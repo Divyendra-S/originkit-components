@@ -1,7 +1,12 @@
 import { useEffect, useRef } from "react"
 import type { CSSProperties } from "react"
 import { addPropertyControls, ControlType, useIsStaticRenderer } from "framer"
-import * as THREE from "three"
+// Pinned, and a full URL rather than a bare name. Framer and the Originkit
+// builder both resolve bare specifiers through a CDN at whatever version is
+// current, and this component is written against r170: on r186 the shadow
+// sampler types no longer match, every instanced draw fails with
+// GL_INVALID_OPERATION, and the capsule shell renders as nothing at all.
+import * as THREE from "https://esm.sh/three@0.170.0"
 
 /**
  * CapsuleOrb
@@ -18,9 +23,8 @@ import * as THREE from "three"
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const INSTANCES_COUNT = 3000
+const DEFAULT_INSTANCES_COUNT = 3000
 const BLOOM_LEVELS = 8
-const BLOOM_RADIUS = 0.85
 const DEFAULT_NOISE_URL =
     "https://raw.githubusercontent.com/emmelleppi/threejs-challenge-0/main/public/bnoise.png"
 const DEFAULT_MATCAP_URL =
@@ -32,7 +36,10 @@ const ORBIT_CONFIGS = [
     { speed: 0.5, phase: Math.PI / 2.2, plane: "yz", dir: 1 },
     { speed: 1.2, phase: Math.PI / 1.7, plane: "xy", dir: -1 },
 ] as const
-const ORBIT_RADIUS = 1.9
+
+/** The sphere radius the capsules sit on, and the marble radius the geometry is built at. */
+const SPHERE_RADIUS = 1.5
+const BASE_ORB_SIZE = 0.3
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scene shaders (verbatim from the original, with the shared PCF shadow code
@@ -132,6 +139,8 @@ const HERO_VERTEX = /* glsl */ `
     #endif
 
     uniform float u_scale;
+    uniform float u_attenuation;
+    uniform float u_bulge;
     uniform vec3 u_sphere1Position;
     uniform vec3 u_sphere2Position;
     uniform vec3 u_sphere3Position;
@@ -154,7 +163,7 @@ const HERO_VERTEX = /* glsl */ `
         float distanceToSphere3 = length(a_instancePos - u_sphere3Position);
         float distanceToSphere4 = length(a_instancePos - u_sphere4Position);
 
-        float attenuationStrength = 4.0;
+        float attenuationStrength = u_attenuation;
 
         float displacement = 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere1 * distanceToSphere1), 0.0, 1.0);
         displacement = min(displacement, 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere2 * distanceToSphere2), 0.0, 1.0));
@@ -170,7 +179,7 @@ const HERO_VERTEX = /* glsl */ `
         pos = rotateByQuaternion(pos, a_instanceQuaternions);
         pos *= u_scale;
         pos += a_instancePos;
-        pos += normalize(a_instancePos) * 0.4 * pow(displacement, 0.7);
+        pos += normalize(a_instancePos) * u_bulge * pow(displacement, 0.7);
 
         norm = rotateByQuaternion(norm, a_instanceQuaternions);
 
@@ -209,6 +218,7 @@ const HERO_FRAGMENT = /* glsl */ `
     uniform vec2 u_noiseTexelSize;
     uniform vec2 u_noiseCoordOffset;
     uniform vec3 u_color;
+    uniform float u_shadowStrength;
 
     ${SHADOW_SAMPLING_GLSL}
 
@@ -237,7 +247,7 @@ const HERO_FRAGMENT = /* glsl */ `
         float ao = linearStep(-0.5, -3.0, v_modelPosition.y);
 
         float shadow = getShadowMask();
-        shadow = 0.4 + 0.6 * shadow;
+        shadow = mix(1.0 - u_shadowStrength, 1.0, shadow);
 
         vec3 color = u_color;
         color *= clamp(attenuation + smoothstep(-0.05, 1.0, NdL), 0.0, 1.0);
@@ -304,6 +314,9 @@ const SPHERE_FRAGMENT = /* glsl */ `
     uniform sampler2D u_sceneTexture;
     uniform mat4 projectionMatrix;
     uniform sampler2D u_matcap;
+    uniform float u_thickness;
+    uniform float u_ior;
+    uniform vec3 u_glassTint;
 
     ${SHADOW_SAMPLING_GLSL}
 
@@ -330,8 +343,8 @@ const SPHERE_FRAGMENT = /* glsl */ `
         float NdV = max(0., dot(N, V));
         float fresnel = pow(1.0 - NdV, 5.0);
 
-        float thickness = 0.6;
-        float ior = 1.45;
+        float thickness = u_thickness;
+        float ior = u_ior;
         float refractionRatio = 1.0 / ior;
         vec3 refractionVector = refract( -V, N, refractionRatio );
 
@@ -358,7 +371,7 @@ const SPHERE_FRAGMENT = /* glsl */ `
         color += (0.1 + 0.9 * shadow) * 0.03 * pow(matcapColor.rgb, vec3(2.2));
         color += shadow * 0.005 * fresnel;
 
-        gl_FragColor = vec4(0.8 * color, 1.);
+        gl_FragColor = vec4(0.8 * color * u_glassTint, 1.);
         gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
     }
 `
@@ -367,6 +380,7 @@ const FLOOR_FRAGMENT = /* glsl */ `
     uniform sampler2D u_noiseTexture;
     uniform vec2 u_noiseTexelSize;
     uniform vec2 u_noiseCoordOffset;
+    uniform float u_contactShadow;
 
     ${SHADOW_SAMPLING_GLSL}
 
@@ -385,7 +399,7 @@ const FLOOR_FRAGMENT = /* glsl */ `
 
     void main() {
         float shadow = getShadowMask();
-        gl_FragColor = vec4(vec3(0.0, 0.02, 0.0), 0.3 * (1.0 - shadow));
+        gl_FragColor = vec4(vec3(0.0, 0.02, 0.0), u_contactShadow * (1.0 - shadow));
     }
 `
 
@@ -401,8 +415,12 @@ const BACKGROUND_FRAGMENT = /* glsl */ `
     varying vec2 v_uv;
     uniform vec3 u_color0;
     uniform vec3 u_color1;
+    uniform float u_angle;
     void main() {
-        gl_FragColor = vec4(mix(u_color0, u_color1, v_uv.x), 1.0);
+        // At 0deg this reduces to mix(..., v_uv.x) — the original horizontal ramp.
+        float a = radians(u_angle);
+        float t = clamp(dot(v_uv - 0.5, vec2(cos(a), sin(a))) + 0.5, 0.0, 1.0);
+        gl_FragColor = vec4(mix(u_color0, u_color1, t), 1.0);
     }
 `
 
@@ -608,6 +626,19 @@ function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value))
 }
 
+/**
+ * A number, or the fallback when the prop arrived as something else.
+ *
+ * Outside Framer a control can hand over a value of the wrong type — an empty
+ * string is the usual one — and `clamp` would coerce that to 0 rather than
+ * reject it. Harmless for most props; for the pixel ratio it means a 0×0
+ * drawing buffer and a black canvas, which is a very confusing way to find out.
+ */
+function num(value: unknown, fallback: number): number {
+    const n = typeof value === "number" ? value : Number(value)
+    return Number.isFinite(n) ? n : fallback
+}
+
 function makeFallbackNoise(): THREE.Texture {
     const size = 128
     const data = new Uint8Array(size * size * 4)
@@ -667,8 +698,8 @@ function loadTexture(
     return { cancel: () => (cancelled = true) }
 }
 
-/** 3,000 capsules distributed on a sphere with a golden-angle spiral, pointing inwards. */
-function buildCapsuleGeometry(): THREE.InstancedBufferGeometry {
+/** `count` capsules distributed on a sphere with a golden-angle spiral, pointing inwards. */
+function buildCapsuleGeometry(count: number): THREE.InstancedBufferGeometry {
     const refGeometry = new THREE.CapsuleGeometry(1, 4, 4, 16)
     const geometry = new THREE.InstancedBufferGeometry()
     for (const name in refGeometry.attributes) {
@@ -676,17 +707,17 @@ function buildCapsuleGeometry(): THREE.InstancedBufferGeometry {
     }
     geometry.setIndex(refGeometry.index)
 
-    const positions = new Float32Array(INSTANCES_COUNT * 3)
-    const quaternions = new Float32Array(INSTANCES_COUNT * 4)
+    const positions = new Float32Array(count * 3)
+    const quaternions = new Float32Array(count * 4)
 
-    const sphereRadius = 1.5
+    const sphereRadius = SPHERE_RADIUS
     const goldenAngle = Math.PI * (3 - Math.sqrt(5))
     const up = new THREE.Vector3(0, 1, 0)
     const tempPos = new THREE.Vector3()
     const tempQuat = new THREE.Quaternion()
 
-    for (let i = 0, i3 = 0, i4 = 0; i < INSTANCES_COUNT; i++, i3 += 3, i4 += 4) {
-        const y = 1 - (i / (INSTANCES_COUNT - 1)) * 2
+    for (let i = 0, i3 = 0, i4 = 0; i < count; i++, i3 += 3, i4 += 4) {
+        const y = 1 - (i / (count - 1)) * 2
         const radius = Math.sqrt(1 - y * y)
         const theta = goldenAngle * i
 
@@ -713,13 +744,33 @@ function buildCapsuleGeometry(): THREE.InstancedBufferGeometry {
     return geometry
 }
 
-function orbitPosition(t: number, config: (typeof ORBIT_CONFIGS)[number], out: THREE.Vector3): THREE.Vector3 {
+function orbitPosition(
+    t: number,
+    config: (typeof ORBIT_CONFIGS)[number],
+    radius: number,
+    out: THREE.Vector3
+): THREE.Vector3 {
     const angle = config.dir * config.speed * t + config.phase
-    const c = Math.cos(angle) * ORBIT_RADIUS
-    const s = Math.sin(angle) * ORBIT_RADIUS
+    const c = Math.cos(angle) * radius
+    const s = Math.sin(angle) * radius
     if (config.plane === "xy") return out.set(c, s, 0)
     if (config.plane === "xz") return out.set(c, 0, s)
     return out.set(0, c, s)
+}
+
+/**
+ * The dent a marble carves scales with both the marble and the Dent Size multiplier.
+ * Its radius goes as 1/sqrt(attenuation), so the combined factor is squared.
+ */
+function dentAttenuation(dentSize: number, orbSize: number): number {
+    const scale = Math.max(0.05, dentSize * (orbSize / BASE_ORB_SIZE))
+    return 4 / (scale * scale)
+}
+
+/** Azimuth in degrees around Y plus a height factor, on a sphere of radius 5. */
+function lightVector(angle: number, height: number, out: THREE.Vector3): THREE.Vector3 {
+    const a = (angle * Math.PI) / 180
+    return out.set(Math.cos(a), height, Math.sin(a)).normalize().multiplyScalar(5)
 }
 
 function makeRenderTarget(options?: THREE.RenderTargetOptions): THREE.WebGLRenderTarget {
@@ -736,6 +787,8 @@ function makeRenderTarget(options?: THREE.RenderTargetOptions): THREE.WebGLRende
 
 class OrbitController {
     enabled = true
+    zoomEnabled = true
+    autoRotate = 0
     private theta = 0
     private phi = Math.PI / 2
     private radius = 5
@@ -787,7 +840,7 @@ class OrbitController {
             this.targetTheta -= (2 * Math.PI * (current.x - previous.x)) / height
             this.targetPhi -= (2 * Math.PI * (current.y - previous.y)) / height
             this.targetPhi = clamp(this.targetPhi, 0.05, Math.PI - 0.05)
-        } else if (this.pointers.size === 2) {
+        } else if (this.pointers.size === 2 && this.zoomEnabled) {
             const distance = this.currentPinchDistance()
             if (this.pinchDistance > 0) {
                 this.targetRadius = clamp(this.targetRadius * (this.pinchDistance / distance), 2.5, 14)
@@ -804,7 +857,7 @@ class OrbitController {
     }
 
     private onWheel = (event: WheelEvent) => {
-        if (!this.enabled) return
+        if (!this.enabled || !this.zoomEnabled) return
         event.preventDefault()
         const scale = Math.pow(0.95, Math.abs(event.deltaY) * 0.01)
         this.targetRadius = clamp(event.deltaY < 0 ? this.targetRadius * scale : this.targetRadius / scale, 2.5, 14)
@@ -815,8 +868,26 @@ class OrbitController {
         return Math.hypot(a.x - b.x, a.y - b.y)
     }
 
+    /** Distance from the origin. Ignored while the pointer is down. */
+    setDistance(radius: number) {
+        if (this.pointers.size > 0) return
+        this.targetRadius = clamp(radius, 2.5, 14)
+    }
+
+    /** Jump straight to the target orientation — used for non-animated renders. */
+    snap() {
+        this.theta = this.targetTheta
+        this.phi = this.targetPhi
+        this.radius = this.targetRadius
+        this.camera.position.setFromSphericalCoords(this.radius, this.phi, this.theta)
+        this.camera.lookAt(0, 0, 0)
+    }
+
     /** Returns true when the camera moved this frame. */
-    update(): boolean {
+    update(delta: number): boolean {
+        if (this.autoRotate !== 0 && this.pointers.size === 0) {
+            this.targetTheta += this.autoRotate * delta
+        }
         const damping = 0.18
         const dTheta = this.targetTheta - this.theta
         const dPhi = this.targetPhi - this.phi
@@ -842,15 +913,44 @@ class OrbitController {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface SceneParams {
+    // Structure
+    capsuleCount: number
+    capsuleScale: number
+    bulge: number
+    dentSize: number
+    orbCount: number
+    orbSize: number
+    orbDistance: number
+    distance: number
+    // Animation
+    speed: number
+    autoRotate: boolean
+    autoRotateSpeed: number
+    // Interaction
+    interactive: boolean
+    allowZoom: boolean
+    // Colors
     backgroundLeft: string
     backgroundRight: string
+    gradientAngle: number
     capsuleColor: string
-    capsuleScale: number
-    speed: number
+    coreColor: string
+    glassTint: string
+    // Light & shadow
+    lightAngle: number
+    lightHeight: number
+    shadowStrength: number
+    contactShadow: number
+    // Glass
+    refraction: number
+    glassThickness: number
+    // Effects
     bloomIntensity: number
     bloomThreshold: number
+    bloomSpread: number
     vignette: number
-    interactive: boolean
+    vignetteSpread: number
+    // Performance
     maxPixelRatio: number
 }
 
@@ -902,10 +1002,10 @@ function createExperience(
     // ── Scene ────────────────────────────────────────────────────────────────
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 30)
-    camera.position.set(0, 0, 5)
+    camera.position.set(0, 0, clamp(params.distance, 2.5, 14))
     camera.lookAt(0, 0, 0)
 
-    const lightPosition = new THREE.Vector3(-1, 0.8, 0.25).normalize().multiplyScalar(5)
+    const lightPosition = lightVector(params.lightAngle, params.lightHeight, new THREE.Vector3())
     const light = new THREE.DirectionalLight(0xffffff, 1)
     light.position.copy(lightPosition)
     light.castShadow = true
@@ -927,6 +1027,10 @@ function createExperience(
     const heroUniforms: Record<string, THREE.IUniform> = Object.assign(
         {
             u_scale: { value: params.capsuleScale },
+            u_bulge: { value: params.bulge },
+            u_attenuation: { value: dentAttenuation(params.dentSize, params.orbSize) },
+            u_shadowStrength: { value: params.shadowStrength },
+            u_contactShadow: { value: params.contactShadow },
             u_lightPosition: { value: lightPosition },
             u_noiseTexture: { value: null },
             u_noiseTexelSize: { value: new THREE.Vector2(1 / 128, 1 / 128) },
@@ -945,6 +1049,9 @@ function createExperience(
             u_lightPosition: { value: lightPosition },
             u_sceneTexture: { value: null },
             u_matcap: { value: null },
+            u_thickness: { value: params.glassThickness },
+            u_ior: { value: params.refraction },
+            u_glassTint: { value: toColor(params.glassTint, "#FFFFFF") },
         },
         THREE.UniformsUtils.merge([THREE.UniformsLib.lights])
     )
@@ -952,6 +1059,7 @@ function createExperience(
     const backgroundUniforms = {
         u_color0: { value: toColor(params.backgroundLeft, "#AEB2B5") },
         u_color1: { value: toColor(params.backgroundRight, "#939A9D") },
+        u_angle: { value: params.gradientAngle },
     }
 
     // Background gradient (clip-space quad, drawn first, no depth).
@@ -968,13 +1076,13 @@ function createExperience(
     scene.add(background)
 
     // Dark core sphere.
-    const coreMaterial = new THREE.MeshBasicMaterial({ color: "#111" })
-    const core = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 32), coreMaterial)
+    const coreMaterial = new THREE.MeshBasicMaterial({ color: toColor(params.coreColor, "#111111") })
+    const core = new THREE.Mesh(new THREE.SphereGeometry(SPHERE_RADIUS, 32, 32), coreMaterial)
     core.renderOrder = -1
     scene.add(core)
 
     // Instanced capsules.
-    const capsuleGeometry = buildCapsuleGeometry()
+    let capsuleGeometry = buildCapsuleGeometry(params.capsuleCount)
     const heroMaterial = new THREE.ShaderMaterial({
         vertexShader: HERO_VERTEX,
         fragmentShader: HERO_FRAGMENT,
@@ -995,7 +1103,7 @@ function createExperience(
     scene.add(hero)
 
     // Glass spheres (layer 1: rendered after the scene has been captured for refraction).
-    const sphereGeometry = new THREE.SphereGeometry(0.3, 32, 32)
+    const sphereGeometry = new THREE.SphereGeometry(BASE_ORB_SIZE, 32, 32)
     const sphereMaterial = new THREE.ShaderMaterial({
         vertexShader: SURFACE_VERTEX,
         fragmentShader: SPHERE_FRAGMENT,
@@ -1004,6 +1112,7 @@ function createExperience(
     })
     const spheres = ORBIT_CONFIGS.map(() => {
         const mesh = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        mesh.scale.setScalar(params.orbSize / BASE_ORB_SIZE)
         mesh.renderOrder = 1
         mesh.receiveShadow = true
         mesh.layers.set(1)
@@ -1022,6 +1131,7 @@ function createExperience(
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), floorMaterial)
     floor.rotation.x = -Math.PI / 2
     floor.position.set(4, -3, -1.5)
+    floor.visible = params.contactShadow > 0
     floor.layers.set(1)
     scene.add(floor)
 
@@ -1084,7 +1194,7 @@ function createExperience(
             inputBuffer: { value: null },
             supportBuffer: { value: null },
             texelSize: { value: new THREE.Vector2() },
-            radius: { value: BLOOM_RADIUS },
+            radius: { value: params.bloomSpread },
         },
         depthTest: false,
         depthWrite: false,
@@ -1096,7 +1206,7 @@ function createExperience(
             inputBuffer: { value: null },
             bloomBuffer: { value: null },
             intensity: { value: params.bloomIntensity },
-            offset: { value: 0.3 },
+            offset: { value: params.vignetteSpread },
             darkness: { value: params.vignette },
         },
         depthTest: false,
@@ -1115,7 +1225,7 @@ function createExperience(
     function resize() {
         const width = Math.max(1, container.clientWidth)
         const height = Math.max(1, container.clientHeight)
-        const dpr = clamp(window.devicePixelRatio || 1, 1, params.maxPixelRatio)
+        const dpr = clamp(window.devicePixelRatio || 1, 1, num(params.maxPixelRatio, 1.5))
         renderer.setPixelRatio(dpr)
         renderer.setSize(width, height, false)
         camera.aspect = width / height
@@ -1172,6 +1282,8 @@ function createExperience(
     // ── Controls ─────────────────────────────────────────────────────────────
     const controls = new OrbitController(camera, container)
     controls.enabled = params.interactive
+    controls.zoomEnabled = params.allowZoom
+    controls.autoRotate = params.autoRotate ? params.autoRotateSpeed : 0
 
     // ── Frame ────────────────────────────────────────────────────────────────
     let time = 0
@@ -1185,10 +1297,18 @@ function createExperience(
 
     function renderFrame(delta: number) {
         time += delta * params.speed
-        controls.update()
+        controls.update(delta)
 
         for (let i = 0; i < spheres.length; i++) {
-            orbitPosition(time, ORBIT_CONFIGS[i], tempVector)
+            if (i >= params.orbCount) {
+                // Parked far away: `displacement` is a min() over the marbles, so a
+                // distant marble contributes 1.0 and leaves the sphere undented.
+                spheres[i].visible = false
+                spherePositionUniforms[i].value.set(1000, 1000, 1000)
+                continue
+            }
+            spheres[i].visible = true
+            orbitPosition(time, ORBIT_CONFIGS[i], params.orbDistance, tempVector)
             spheres[i].position.copy(tempVector)
             spherePositionUniforms[i].value.copy(tempVector)
         }
@@ -1269,6 +1389,7 @@ function createExperience(
 
     function renderOnce() {
         if (disposed) return
+        controls.snap()
         renderFrame(0)
     }
 
@@ -1298,14 +1419,51 @@ function createExperience(
 
     return {
         setParams(next) {
+            const previous = params
             params = next
-            controls.enabled = next.interactive
+
+            // Structure — only the capsule count needs new attribute buffers.
+            if (next.capsuleCount !== previous.capsuleCount) {
+                const geometry = buildCapsuleGeometry(next.capsuleCount)
+                capsuleGeometry.dispose()
+                capsuleGeometry = geometry
+                hero.geometry = geometry
+            }
             heroUniforms.u_scale.value = next.capsuleScale
+            heroUniforms.u_bulge.value = next.bulge
+            heroUniforms.u_attenuation.value = dentAttenuation(next.dentSize, next.orbSize)
+            spheres.forEach((mesh) => mesh.scale.setScalar(next.orbSize / BASE_ORB_SIZE))
+
+            // Camera & interaction
+            controls.enabled = next.interactive
+            controls.zoomEnabled = next.allowZoom
+            controls.autoRotate = next.autoRotate ? next.autoRotateSpeed : 0
+            if (next.distance !== previous.distance) controls.setDistance(next.distance)
+
+            // Colors
             heroUniforms.u_color.value = toColor(next.capsuleColor, "#B2B8BB")
+            coreMaterial.color = toColor(next.coreColor, "#111111")
+            sphereUniforms.u_glassTint.value = toColor(next.glassTint, "#FFFFFF")
             backgroundUniforms.u_color0.value = toColor(next.backgroundLeft, "#AEB2B5")
             backgroundUniforms.u_color1.value = toColor(next.backgroundRight, "#939A9D")
+            backgroundUniforms.u_angle.value = next.gradientAngle
+
+            // Light & shadow — both materials share the one lightPosition vector.
+            lightVector(next.lightAngle, next.lightHeight, lightPosition)
+            light.position.copy(lightPosition)
+            heroUniforms.u_shadowStrength.value = next.shadowStrength
+            heroUniforms.u_contactShadow.value = next.contactShadow
+            floor.visible = next.contactShadow > 0
+
+            // Glass
+            sphereUniforms.u_thickness.value = next.glassThickness
+            sphereUniforms.u_ior.value = next.refraction
+
+            // Effects
             compositeMaterial.uniforms.intensity.value = next.bloomIntensity
             compositeMaterial.uniforms.darkness.value = next.vignette
+            compositeMaterial.uniforms.offset.value = next.vignetteSpread
+            upsampleMaterial.uniforms.radius.value = next.bloomSpread
             luminanceMaterial.uniforms.threshold.value = next.bloomThreshold
         },
         resize,
@@ -1365,17 +1523,47 @@ interface ResponsiveImageValue {
 }
 
 interface CapsuleOrbProps {
+    // Layout
+    capsuleCount: number
+    capsuleScale: number
+    bulge: number
+    dentSize: number
+    orbCount: number
+    orbSize: number
+    orbDistance: number
+    distance: number
+    // Animation
+    speed: number
+    autoRotate: boolean
+    autoRotateSpeed: number
+    animateOnCanvas: boolean
+    // Interaction
+    interactive: boolean
+    allowZoom: boolean
+    // Colors
     backgroundLeft: string
     backgroundRight: string
+    gradientAngle: number
     capsuleColor: string
-    capsuleScale: number
-    speed: number
+    coreColor: string
+    glassTint: string
+    // Light & shadow
+    lightAngle: number
+    lightHeight: number
+    shadowStrength: number
+    contactShadow: number
+    // Glass
+    refraction: number
+    glassThickness: number
+    // Effects
     bloomIntensity: number
     bloomThreshold: number
+    bloomSpread: number
     vignette: number
-    interactive: boolean
+    vignetteSpread: number
+    // Performance
     maxPixelRatio: number
-    animateOnCanvas: boolean
+    // Textures
     noiseImage?: ResponsiveImageValue
     matcapImage?: ResponsiveImageValue
     style?: CSSProperties
@@ -1389,17 +1577,38 @@ interface CapsuleOrbProps {
  */
 export default function CapsuleOrb(props: CapsuleOrbProps) {
     const {
+        capsuleCount = DEFAULT_INSTANCES_COUNT,
+        capsuleScale = 0.06,
+        bulge = 0.4,
+        dentSize = 1,
+        orbCount = 4,
+        orbSize = 0.3,
+        orbDistance = 1.9,
+        distance = 5,
+        speed = 1,
+        autoRotate = false,
+        autoRotateSpeed = 0.3,
+        animateOnCanvas = false,
+        interactive = true,
+        allowZoom = true,
         backgroundLeft = "#AEB2B5",
         backgroundRight = "#939A9D",
+        gradientAngle = 0,
         capsuleColor = "#B2B8BB",
-        capsuleScale = 0.06,
-        speed = 1,
+        coreColor = "#111111",
+        glassTint = "#FFFFFF",
+        lightAngle = 166,
+        lightHeight = 0.78,
+        shadowStrength = 0.6,
+        contactShadow = 0.3,
+        refraction = 1.45,
+        glassThickness = 0.6,
         bloomIntensity = 2,
         bloomThreshold = 0.65,
+        bloomSpread = 0.85,
         vignette = 0.6,
-        interactive = true,
+        vignetteSpread = 0.3,
         maxPixelRatio = 1.5,
-        animateOnCanvas = false,
         noiseImage,
         matcapImage,
         style,
@@ -1414,15 +1623,36 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
     const experienceRef = useRef<Experience | null>(null)
 
     const params: SceneParams = {
+        capsuleCount: Math.round(clamp(num(capsuleCount, DEFAULT_INSTANCES_COUNT), 100, 8000)),
+        capsuleScale,
+        bulge,
+        dentSize,
+        orbCount: Math.round(clamp(num(orbCount, ORBIT_CONFIGS.length), 0, ORBIT_CONFIGS.length)),
+        orbSize,
+        orbDistance,
+        distance,
+        speed,
+        autoRotate,
+        autoRotateSpeed,
+        interactive,
+        allowZoom,
         backgroundLeft,
         backgroundRight,
+        gradientAngle,
         capsuleColor,
-        capsuleScale,
-        speed,
+        coreColor,
+        glassTint,
+        lightAngle,
+        lightHeight,
+        shadowStrength,
+        contactShadow,
+        refraction,
+        glassThickness,
         bloomIntensity,
         bloomThreshold,
+        bloomSpread,
         vignette,
-        interactive,
+        vignetteSpread,
         maxPixelRatio,
     }
     const paramsRef = useRef(params)
@@ -1464,15 +1694,36 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         experience.resize()
         if (!animate) experience.renderOnce()
     }, [
+        capsuleCount,
+        capsuleScale,
+        bulge,
+        dentSize,
+        orbCount,
+        orbSize,
+        orbDistance,
+        distance,
+        speed,
+        autoRotate,
+        autoRotateSpeed,
+        interactive,
+        allowZoom,
         backgroundLeft,
         backgroundRight,
+        gradientAngle,
         capsuleColor,
-        capsuleScale,
-        speed,
+        coreColor,
+        glassTint,
+        lightAngle,
+        lightHeight,
+        shadowStrength,
+        contactShadow,
+        refraction,
+        glassThickness,
         bloomIntensity,
         bloomThreshold,
+        bloomSpread,
         vignette,
-        interactive,
+        vignetteSpread,
         maxPixelRatio,
         animate,
     ])
@@ -1495,89 +1746,150 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
 }
 
 addPropertyControls(CapsuleOrb, {
-    backgroundLeft: {
-        type: ControlType.Color,
-        title: "Background L",
-        defaultValue: "#AEB2B5",
-    },
-    backgroundRight: {
-        type: ControlType.Color,
-        title: "Background R",
-        defaultValue: "#939A9D",
-    },
-    capsuleColor: {
-        type: ControlType.Color,
+    // Kept deliberately small. Every other knob the scene supports still exists
+    // as a prop with a default — see the destructuring in CapsuleOrb — it just
+    // isn't worth a row in the panel.
+    //
+    // No Enum controls here on purpose: an Enum whose options are numbers loses
+    // them outside Framer (option lists are read as strings), and the component
+    // then receives "" where it expected a number. `Marbles` is a stepper for
+    // that reason.
+
+    // ── Layout ───────────────────────────────────────────────────────────────
+    capsuleCount: {
+        type: ControlType.Number,
         title: "Capsules",
-        defaultValue: "#B2B8BB",
+        description: "How many capsules make up the sphere. Higher is denser and costs more to draw.",
+        defaultValue: DEFAULT_INSTANCES_COUNT,
+        min: 250,
+        max: 8000,
+        step: 50,
     },
     capsuleScale: {
         type: ControlType.Number,
         title: "Capsule Size",
+        description: "The thickness of each individual capsule.",
         defaultValue: 0.06,
-        min: 0.02,
-        max: 0.12,
+        min: 0.01,
+        max: 0.16,
         step: 0.005,
     },
+    orbCount: {
+        type: ControlType.Number,
+        title: "Marbles",
+        description: "How many glass marbles orbit the sphere and dent it as they pass.",
+        defaultValue: 4,
+        min: 0,
+        max: 4,
+        step: 1,
+        displayStepper: true,
+    },
+    orbSize: {
+        type: ControlType.Number,
+        title: "Marble Size",
+        description: "The radius of each marble. The dents it carves scale with it.",
+        defaultValue: 0.3,
+        min: 0.1,
+        max: 0.8,
+        step: 0.01,
+        hidden: (props: CapsuleOrbProps) => props.orbCount === 0,
+    },
+    distance: {
+        type: ControlType.Number,
+        title: "Distance",
+        description: "Camera distance, framing the orb tighter or wider.",
+        defaultValue: 5,
+        min: 2.5,
+        max: 14,
+        step: 0.1,
+    },
+
+    // ── Animation ────────────────────────────────────────────────────────────
     speed: {
         type: ControlType.Number,
         title: "Speed",
+        description: "How fast the marbles travel around their orbits.",
         defaultValue: 1,
         min: 0,
         max: 3,
         step: 0.05,
     },
-    bloomIntensity: {
-        type: ControlType.Number,
-        title: "Bloom",
-        defaultValue: 2,
-        min: 0,
-        max: 5,
-        step: 0.1,
-    },
-    bloomThreshold: {
-        type: ControlType.Number,
-        title: "Bloom Cutoff",
-        defaultValue: 0.65,
-        min: 0,
-        max: 1,
-        step: 0.01,
-    },
-    vignette: {
-        type: ControlType.Number,
-        title: "Vignette",
-        defaultValue: 0.6,
-        min: 0,
-        max: 1,
-        step: 0.05,
-    },
-    interactive: {
+    autoRotate: {
         type: ControlType.Boolean,
-        title: "Orbit",
-        defaultValue: true,
-        enabledTitle: "Drag",
-        disabledTitle: "Off",
-    },
-    maxPixelRatio: {
-        type: ControlType.Number,
-        title: "Max DPR",
-        defaultValue: 1.5,
-        min: 1,
-        max: 2,
-        step: 0.25,
+        title: "Auto Rotate",
+        description: "Spins the camera around the orb on its own.",
+        defaultValue: false,
+        enabledTitle: "Yes",
+        disabledTitle: "No",
     },
     animateOnCanvas: {
         type: ControlType.Boolean,
         title: "On Canvas",
+        description: "Keep animating on the Framer canvas instead of rendering one static frame.",
         defaultValue: false,
         enabledTitle: "Animate",
         disabledTitle: "Static",
     },
-    noiseImage: {
-        type: ControlType.ResponsiveImage,
-        title: "Noise",
+
+    // ── Interaction ──────────────────────────────────────────────────────────
+    interactive: {
+        type: ControlType.Boolean,
+        title: "Orbit",
+        description: "Lets visitors drag to orbit the camera and zoom.",
+        defaultValue: true,
+        enabledTitle: "Drag",
+        disabledTitle: "Off",
     },
-    matcapImage: {
-        type: ControlType.ResponsiveImage,
-        title: "Matcap",
+
+    // ── Colors ───────────────────────────────────────────────────────────────
+    backgroundLeft: {
+        type: ControlType.Color,
+        title: "Background A",
+        description: "The first stop of the background gradient.",
+        defaultValue: "#AEB2B5",
+    },
+    backgroundRight: {
+        type: ControlType.Color,
+        title: "Background B",
+        description: "The second stop of the background gradient.",
+        defaultValue: "#939A9D",
+    },
+    capsuleColor: {
+        type: ControlType.Color,
+        title: "Capsule Color",
+        description: "The base color of the capsules before lighting.",
+        defaultValue: "#B2B8BB",
+    },
+
+    // ── Light ────────────────────────────────────────────────────────────────
+    lightAngle: {
+        type: ControlType.Number,
+        title: "Light Angle",
+        description: "Rotates the key light around the orb.",
+        defaultValue: 166,
+        min: 0,
+        max: 360,
+        step: 1,
+        unit: "\u00b0",
+    },
+    lightHeight: {
+        type: ControlType.Number,
+        title: "Light Height",
+        description: "Raises or lowers the key light above the orb.",
+        defaultValue: 0.78,
+        min: -1.5,
+        max: 1.5,
+        step: 0.02,
+    },
+
+    // ── Effects ──────────────────────────────────────────────────────────────
+    bloomIntensity: {
+        type: ControlType.Number,
+        title: "Bloom",
+        description: "How strongly the bright edges glow.",
+        defaultValue: 2,
+        min: 0,
+        max: 5,
+        step: 0.1,
     },
 })
