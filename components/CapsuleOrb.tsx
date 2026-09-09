@@ -1,0 +1,1583 @@
+import { useEffect, useRef } from "react"
+import type { CSSProperties } from "react"
+import { addPropertyControls, ControlType, useIsStaticRenderer } from "framer"
+import * as THREE from "three"
+
+/**
+ * CapsuleOrb
+ *
+ * A sphere made of 3,000 instanced capsules, pushed around by four orbiting glass
+ * marbles. Ported from https://github.com/emmelleppi/threejs-challenge-0 into a
+ * single Framer code component. Only `three` is imported: the post-processing
+ * (mipmap bloom, vignette, sRGB output), the Kawase refraction blur, shadows and
+ * orbit controls are all implemented inline so nothing depends on React Three
+ * Fiber or the `postprocessing` package.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const INSTANCES_COUNT = 3000
+const BLOOM_LEVELS = 8
+const BLOOM_RADIUS = 0.85
+const DEFAULT_NOISE_URL =
+    "https://raw.githubusercontent.com/emmelleppi/threejs-challenge-0/main/public/bnoise.png"
+const DEFAULT_MATCAP_URL =
+    "https://raw.githubusercontent.com/emmelleppi/threejs-challenge-0/main/public/glass.png"
+
+const ORBIT_CONFIGS = [
+    { speed: 1.0, phase: Math.PI / 1.1, plane: "yz", dir: 1 },
+    { speed: 0.75, phase: Math.PI / 3.4, plane: "xz", dir: -1 },
+    { speed: 0.5, phase: Math.PI / 2.2, plane: "yz", dir: 1 },
+    { speed: 1.2, phase: Math.PI / 1.7, plane: "xy", dir: -1 },
+] as const
+const ORBIT_RADIUS = 1.9
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene shaders (verbatim from the original, with the shared PCF shadow code
+// factored into one chunk)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHADOW_STRUCT_GLSL = /* glsl */ `
+    struct DirectionalLightShadow {
+        float shadowBias;
+        float shadowNormalBias;
+        float shadowRadius;
+        vec2 shadowMapSize;
+    };
+`
+
+const SHADOW_SAMPLING_GLSL = /* glsl */ `
+    uniform sampler2D directionalShadowMap[ 1 ];
+    varying vec4 vDirectionalShadowCoord[ 1 ];
+    ${SHADOW_STRUCT_GLSL}
+    uniform DirectionalLightShadow directionalLightShadows[ 1 ];
+
+    #include <packing>
+
+    float texture2DCompare( sampler2D depths, vec2 uv, float compare ) {
+        return step( compare, unpackRGBAToDepth( texture2D( depths, uv ) ) );
+    }
+
+    float getShadow( sampler2D shadowMap, vec2 shadowMapSize, float shadowBias, float shadowRadius, vec4 shadowCoord ) {
+        float shadow = 1.0;
+
+        shadowCoord.xyz /= shadowCoord.w;
+        shadowCoord.z += shadowBias;
+
+        bvec4 inFrustumVec = bvec4 ( shadowCoord.x >= 0.0, shadowCoord.x <= 1.0, shadowCoord.y >= 0.0, shadowCoord.y <= 1.0 );
+        bool inFrustum = all( inFrustumVec );
+        bvec2 frustumTestVec = bvec2( inFrustum, shadowCoord.z <= 1.0 );
+        bool frustumTest = all( frustumTestVec );
+
+        if ( frustumTest ) {
+            vec2 texelSize = vec2( 1.0 ) / shadowMapSize;
+
+            float dx0 = - texelSize.x * shadowRadius;
+            float dy0 = - texelSize.y * shadowRadius;
+            float dx1 = + texelSize.x * shadowRadius;
+            float dy1 = + texelSize.y * shadowRadius;
+            float dx2 = dx0 / 2.0;
+            float dy2 = dy0 / 2.0;
+            float dx3 = dx1 / 2.0;
+            float dy3 = dy1 / 2.0;
+
+            shadow = (
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, dy0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, dy0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, dy2 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy2 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, dy2 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, 0.0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, 0.0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy, shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, 0.0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, 0.0 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, dy3 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy3 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, dy3 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, dy1 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy1 ), shadowCoord.z ) +
+                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, dy1 ), shadowCoord.z )
+            ) * ( 1.0 / 17.0 );
+        }
+
+        return shadow;
+    }
+`
+
+const HERO_VERTEX = /* glsl */ `
+    attribute vec3 a_instancePos;
+    attribute vec4 a_instanceQuaternions;
+
+    #ifdef IS_DEPTH
+        varying vec2 vHighPrecisionZW;
+    #else
+        varying vec3 v_worldPosition;
+        varying vec2 v_uv;
+        varying vec3 v_instancePos;
+        varying vec3 v_viewPosition;
+        varying vec3 v_viewNormal;
+        varying vec3 v_modelPosition;
+        varying vec3 v_worldNormal;
+
+        #ifdef USE_SHADOWMAP
+            uniform mat4 directionalShadowMatrix[1];
+            varying vec4 vDirectionalShadowCoord[1];
+            ${SHADOW_STRUCT_GLSL}
+            uniform DirectionalLightShadow directionalLightShadows[1];
+        #endif
+    #endif
+
+    uniform float u_scale;
+    uniform vec3 u_sphere1Position;
+    uniform vec3 u_sphere2Position;
+    uniform vec3 u_sphere3Position;
+    uniform vec3 u_sphere4Position;
+
+    vec3 rotateByQuaternion(vec3 v, vec4 q) {
+        return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+    }
+
+    vec3 inverseTransformDirection(in vec3 dir, in mat4 matrix) {
+        return normalize((vec4(dir, 0.0) * matrix).xyz);
+    }
+
+    void main() {
+        vec3 pos = position;
+        vec3 norm = normal;
+
+        float distanceToSphere1 = length(a_instancePos - u_sphere1Position);
+        float distanceToSphere2 = length(a_instancePos - u_sphere2Position);
+        float distanceToSphere3 = length(a_instancePos - u_sphere3Position);
+        float distanceToSphere4 = length(a_instancePos - u_sphere4Position);
+
+        float attenuationStrength = 4.0;
+
+        float displacement = 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere1 * distanceToSphere1), 0.0, 1.0);
+        displacement = min(displacement, 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere2 * distanceToSphere2), 0.0, 1.0));
+        displacement = min(displacement, 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere3 * distanceToSphere3), 0.0, 1.0));
+        displacement = min(displacement, 1.0 - clamp(1.0 / (attenuationStrength * distanceToSphere4 * distanceToSphere4), 0.0, 1.0));
+
+        float tip = 1.0 - step(-2.5, pos.y);
+        if (tip > 0.5) {
+            pos.y = -2.5;
+            norm = vec3(0, -1, 0);
+        }
+
+        pos = rotateByQuaternion(pos, a_instanceQuaternions);
+        pos *= u_scale;
+        pos += a_instancePos;
+        pos += normalize(a_instancePos) * 0.4 * pow(displacement, 0.7);
+
+        norm = rotateByQuaternion(norm, a_instanceQuaternions);
+
+        vec4 viewPosition = modelViewMatrix * vec4(pos, 1.0);
+        gl_Position = projectionMatrix * viewPosition;
+
+        #ifdef IS_DEPTH
+            vHighPrecisionZW = gl_Position.zw;
+        #else
+            vec4 worldPosition = (modelMatrix * vec4(pos, 1.0));
+
+            v_uv = uv;
+            v_viewNormal = normalize(normalMatrix * norm);
+            v_worldPosition = worldPosition.xyz;
+            v_modelPosition = position;
+            v_viewPosition = -viewPosition.xyz;
+            v_instancePos = a_instancePos;
+            v_worldNormal = inverseTransformDirection(v_viewNormal, viewMatrix);
+
+            #ifdef USE_SHADOWMAP
+                vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPosition + vec4(v_worldNormal * directionalLightShadows[0].shadowNormalBias, 0. );
+            #endif
+        #endif
+    }
+`
+
+const HERO_FRAGMENT = /* glsl */ `
+    varying vec3 v_worldPosition;
+    varying vec3 v_instancePos;
+    varying vec3 v_viewNormal;
+    varying vec3 v_modelPosition;
+    varying vec3 v_worldNormal;
+
+    uniform vec3 u_lightPosition;
+    uniform sampler2D u_noiseTexture;
+    uniform vec2 u_noiseTexelSize;
+    uniform vec2 u_noiseCoordOffset;
+    uniform vec3 u_color;
+
+    ${SHADOW_SAMPLING_GLSL}
+
+    float linearStep(float edge0, float edge1, float x) {
+        return clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    }
+
+    vec3 getBlueNoise (vec2 coord) {
+        return texture2D(u_noiseTexture, coord * u_noiseTexelSize + u_noiseCoordOffset).rgb;
+    }
+
+    float getShadowMask() {
+        vec3 blueNoise = getBlueNoise(gl_FragCoord.xy);
+        DirectionalLightShadow directionalLight = directionalLightShadows[0];
+        return getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.002, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
+    }
+
+    void main() {
+        vec3 L = normalize(u_lightPosition - v_instancePos);
+        vec3 N = normalize(normalize(v_instancePos) + 0.2 * normalize(v_worldNormal));
+        float NdL = max(0., dot(N, L));
+
+        float distFromLight = length(u_lightPosition - v_worldPosition);
+        float attenuation = 1.0 / (0.00025 * pow(distFromLight, 8.0));
+
+        float ao = linearStep(-0.5, -3.0, v_modelPosition.y);
+
+        float shadow = getShadowMask();
+        shadow = 0.4 + 0.6 * shadow;
+
+        vec3 color = u_color;
+        color *= clamp(attenuation + smoothstep(-0.05, 1.0, NdL), 0.0, 1.0);
+        color = pow(color, vec3(0.8));
+        color *= ao * ao;
+        color *= shadow;
+
+        gl_FragColor = vec4(color, 1.0);
+        gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
+    }
+`
+
+const HERO_DEPTH_FRAGMENT = /* glsl */ `
+    #include <common>
+    #include <packing>
+    varying vec2 vHighPrecisionZW;
+    void main() {
+        float fragCoordZ = 0.5 * vHighPrecisionZW[0] / vHighPrecisionZW[1] + 0.5;
+        gl_FragColor = packDepthToRGBA( fragCoordZ );
+    }
+`
+
+// Shared by the glass spheres and the floor plane.
+const SURFACE_VERTEX = /* glsl */ `
+    varying vec3 v_viewNormal;
+    varying vec2 v_uv;
+    varying vec3 v_worldPosition;
+    varying vec3 v_viewPosition;
+
+    #ifdef USE_SHADOWMAP
+        uniform mat4 directionalShadowMatrix[1];
+        varying vec4 vDirectionalShadowCoord[1];
+        ${SHADOW_STRUCT_GLSL}
+        uniform DirectionalLightShadow directionalLightShadows[1];
+    #endif
+
+    vec3 inverseTransformDirection(in vec3 dir, in mat4 matrix) {
+        return normalize((vec4(dir, 0.0) * matrix).xyz);
+    }
+
+    void main () {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * viewPosition;
+
+        vec4 worldPosition = (modelMatrix * vec4(position, 1.0));
+        v_viewNormal = normalMatrix * normal;
+        v_uv = uv;
+        v_worldPosition = worldPosition.xyz;
+        v_viewPosition = -viewPosition.xyz;
+        vec3 worldNormal = inverseTransformDirection(v_viewNormal, viewMatrix);
+
+        #ifdef USE_SHADOWMAP
+            vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPosition + vec4(worldNormal * directionalLightShadows[0].shadowNormalBias, 0. );
+        #endif
+    }
+`
+
+const SPHERE_FRAGMENT = /* glsl */ `
+    varying vec3 v_viewNormal;
+    varying vec3 v_viewPosition;
+    varying vec3 v_worldPosition;
+
+    uniform vec3 u_lightPosition;
+    uniform sampler2D u_sceneTexture;
+    uniform mat4 projectionMatrix;
+    uniform sampler2D u_matcap;
+
+    ${SHADOW_SAMPLING_GLSL}
+
+    vec3 inverseTransformDirection( in vec3 dir, in mat4 matrix ) {
+        return normalize( ( vec4( dir, 0.0 ) * matrix ).xyz );
+    }
+
+    float getShadowMask() {
+        DirectionalLightShadow directionalLight = directionalLightShadows[0];
+        return getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias, directionalLight.shadowRadius, vDirectionalShadowCoord[0]);
+    }
+
+    void main() {
+        vec3 viewNormal = normalize(v_viewNormal);
+
+        vec3 N = inverseTransformDirection(viewNormal, viewMatrix);
+        vec3 V = normalize(cameraPosition - v_worldPosition);
+        vec3 L = u_lightPosition - v_worldPosition;
+        float lightDistance = length(L);
+        L /= lightDistance;
+
+        vec3 H = normalize(V + L);
+        float spec = max(0.0, dot(H, N));
+        float NdV = max(0., dot(N, V));
+        float fresnel = pow(1.0 - NdV, 5.0);
+
+        float thickness = 0.6;
+        float ior = 1.45;
+        float refractionRatio = 1.0 / ior;
+        vec3 refractionVector = refract( -V, N, refractionRatio );
+
+        vec3 transmissionRay = normalize( refractionVector ) * thickness;
+        vec3 refractedRayExit = v_worldPosition + transmissionRay;
+
+        vec4 ndcPos = projectionMatrix * viewMatrix * vec4( refractedRayExit, 1.0 );
+        vec2 refractionCoords = ndcPos.xy / ndcPos.w;
+        refractionCoords += 1.0;
+        refractionCoords /= 2.0;
+
+        vec3 sceneBlurred = pow(texture2D(u_sceneTexture, refractionCoords).rgb, vec3(2.2));
+
+        vec3 viewDir = normalize( v_viewPosition );
+        vec3 x = normalize( vec3( viewDir.z, 0.0, - viewDir.x ) );
+        vec3 y = cross( viewDir, x );
+        vec2 uv = vec2( dot( x, v_viewNormal ), dot( y, v_viewNormal ) ) * 0.495 + 0.5;
+        vec4 matcapColor = texture2D( u_matcap, uv );
+
+        float shadow = getShadowMask();
+
+        vec3 color = sceneBlurred;
+        color += shadow * 0.2 * pow(spec, 500.0);
+        color += (0.1 + 0.9 * shadow) * 0.03 * pow(matcapColor.rgb, vec3(2.2));
+        color += shadow * 0.005 * fresnel;
+
+        gl_FragColor = vec4(0.8 * color, 1.);
+        gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
+    }
+`
+
+const FLOOR_FRAGMENT = /* glsl */ `
+    uniform sampler2D u_noiseTexture;
+    uniform vec2 u_noiseTexelSize;
+    uniform vec2 u_noiseCoordOffset;
+
+    ${SHADOW_SAMPLING_GLSL}
+
+    vec3 getBlueNoise (vec2 coord) {
+        return texture2D(u_noiseTexture, coord * u_noiseTexelSize + u_noiseCoordOffset).rgb;
+    }
+
+    float getShadowMask() {
+        float shadow = 1.0;
+        vec3 blueNoise = getBlueNoise(gl_FragCoord.xy);
+        DirectionalLightShadow directionalLight = directionalLightShadows[0];
+        shadow *= 0.75 + 0.25 * getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.01, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(50.0 * blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
+        shadow *= getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.5, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(50.0 * blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
+        return shadow;
+    }
+
+    void main() {
+        float shadow = getShadowMask();
+        gl_FragColor = vec4(vec3(0.0, 0.02, 0.0), 0.3 * (1.0 - shadow));
+    }
+`
+
+const BACKGROUND_VERTEX = /* glsl */ `
+    varying vec2 v_uv;
+    void main() {
+        v_uv = position.xy * 0.5 + 0.5;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+`
+
+const BACKGROUND_FRAGMENT = /* glsl */ `
+    varying vec2 v_uv;
+    uniform vec3 u_color0;
+    uniform vec3 u_color1;
+    void main() {
+        gl_FragColor = vec4(mix(u_color0, u_color1, v_uv.x), 1.0);
+    }
+`
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Post-processing shaders (ports of the `postprocessing` passes the original used)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FULLSCREEN_VERTEX = /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+        vUv = position.xy * 0.5 + 0.5;
+        gl_Position = vec4(position.xy, 1.0, 1.0);
+    }
+`
+
+// KawaseBlurMaterial with kernel 0: four taps half a texel away on the diagonals.
+const KAWASE_VERTEX = /* glsl */ `
+    uniform vec4 texelSize;
+    uniform float kernel;
+    varying vec2 vUv0;
+    varying vec2 vUv1;
+    varying vec2 vUv2;
+    varying vec2 vUv3;
+    void main() {
+        vec2 uv = position.xy * 0.5 + 0.5;
+        vec2 dUv = texelSize.xy * vec2(kernel) + texelSize.zw;
+        vUv0 = vec2(uv.x - dUv.x, uv.y + dUv.y);
+        vUv1 = vec2(uv.x + dUv.x, uv.y + dUv.y);
+        vUv2 = vec2(uv.x + dUv.x, uv.y - dUv.y);
+        vUv3 = vec2(uv.x - dUv.x, uv.y - dUv.y);
+        gl_Position = vec4(position.xy, 1.0, 1.0);
+    }
+`
+
+const KAWASE_FRAGMENT = /* glsl */ `
+    uniform sampler2D inputBuffer;
+    varying vec2 vUv0;
+    varying vec2 vUv1;
+    varying vec2 vUv2;
+    varying vec2 vUv3;
+    void main() {
+        vec4 sum = texture2D(inputBuffer, vUv0);
+        sum += texture2D(inputBuffer, vUv1);
+        sum += texture2D(inputBuffer, vUv2);
+        sum += texture2D(inputBuffer, vUv3);
+        gl_FragColor = sum * 0.25;
+    }
+`
+
+const LUMINANCE_FRAGMENT = /* glsl */ `
+    #include <common>
+    uniform sampler2D inputBuffer;
+    uniform float threshold;
+    uniform float smoothing;
+    varying vec2 vUv;
+    void main() {
+        vec4 texel = texture2D(inputBuffer, vUv);
+        float l = luminance(texel.rgb);
+        l = smoothstep(threshold, threshold + smoothing, l) * l;
+        gl_FragColor = vec4(texel.rgb * clamp(l, 0.0, 1.0), l);
+    }
+`
+
+// 13-tap downsample (Call of Duty: Advanced Warfare style), as in MipmapBlurPass.
+const DOWNSAMPLE_VERTEX = /* glsl */ `
+    uniform vec2 texelSize;
+    varying vec2 vUv;
+    varying vec2 vUv00; varying vec2 vUv01; varying vec2 vUv02; varying vec2 vUv03;
+    varying vec2 vUv04; varying vec2 vUv05; varying vec2 vUv06; varying vec2 vUv07;
+    varying vec2 vUv08; varying vec2 vUv09; varying vec2 vUv10; varying vec2 vUv11;
+    void main() {
+        vUv = position.xy * 0.5 + 0.5;
+        vUv00 = vUv + texelSize * vec2(-1.0, 1.0);
+        vUv01 = vUv + texelSize * vec2(1.0, 1.0);
+        vUv02 = vUv + texelSize * vec2(-1.0, -1.0);
+        vUv03 = vUv + texelSize * vec2(1.0, -1.0);
+        vUv04 = vUv + texelSize * vec2(-2.0, 2.0);
+        vUv05 = vUv + texelSize * vec2(0.0, 2.0);
+        vUv06 = vUv + texelSize * vec2(2.0, 2.0);
+        vUv07 = vUv + texelSize * vec2(-2.0, 0.0);
+        vUv08 = vUv + texelSize * vec2(2.0, 0.0);
+        vUv09 = vUv + texelSize * vec2(-2.0, -2.0);
+        vUv10 = vUv + texelSize * vec2(0.0, -2.0);
+        vUv11 = vUv + texelSize * vec2(2.0, -2.0);
+        gl_Position = vec4(position.xy, 1.0, 1.0);
+    }
+`
+
+const DOWNSAMPLE_FRAGMENT = /* glsl */ `
+    #define WEIGHT_INNER 0.125
+    #define WEIGHT_OUTER 0.0555555
+    uniform sampler2D inputBuffer;
+    varying vec2 vUv;
+    varying vec2 vUv00; varying vec2 vUv01; varying vec2 vUv02; varying vec2 vUv03;
+    varying vec2 vUv04; varying vec2 vUv05; varying vec2 vUv06; varying vec2 vUv07;
+    varying vec2 vUv08; varying vec2 vUv09; varying vec2 vUv10; varying vec2 vUv11;
+    float clampToBorder(const in vec2 uv) {
+        return float(uv.s >= 0.0 && uv.s <= 1.0 && uv.t >= 0.0 && uv.t <= 1.0);
+    }
+    void main() {
+        vec4 c = vec4(0.0);
+        vec4 w = WEIGHT_INNER * vec4(clampToBorder(vUv00), clampToBorder(vUv01), clampToBorder(vUv02), clampToBorder(vUv03));
+        c += w.x * texture2D(inputBuffer, vUv00);
+        c += w.y * texture2D(inputBuffer, vUv01);
+        c += w.z * texture2D(inputBuffer, vUv02);
+        c += w.w * texture2D(inputBuffer, vUv03);
+        w = WEIGHT_OUTER * vec4(clampToBorder(vUv04), clampToBorder(vUv05), clampToBorder(vUv06), clampToBorder(vUv07));
+        c += w.x * texture2D(inputBuffer, vUv04);
+        c += w.y * texture2D(inputBuffer, vUv05);
+        c += w.z * texture2D(inputBuffer, vUv06);
+        c += w.w * texture2D(inputBuffer, vUv07);
+        w = WEIGHT_OUTER * vec4(clampToBorder(vUv08), clampToBorder(vUv09), clampToBorder(vUv10), clampToBorder(vUv11));
+        c += w.x * texture2D(inputBuffer, vUv08);
+        c += w.y * texture2D(inputBuffer, vUv09);
+        c += w.z * texture2D(inputBuffer, vUv10);
+        c += w.w * texture2D(inputBuffer, vUv11);
+        c += WEIGHT_OUTER * texture2D(inputBuffer, vUv);
+        gl_FragColor = c;
+    }
+`
+
+// 9-tap tent upsample blended with the matching downsample level.
+const UPSAMPLE_VERTEX = /* glsl */ `
+    uniform vec2 texelSize;
+    varying vec2 vUv;
+    varying vec2 vUv0; varying vec2 vUv1; varying vec2 vUv2; varying vec2 vUv3;
+    varying vec2 vUv4; varying vec2 vUv5; varying vec2 vUv6; varying vec2 vUv7;
+    void main() {
+        vUv = position.xy * 0.5 + 0.5;
+        vUv0 = vUv + texelSize * vec2(-1.0, 1.0);
+        vUv1 = vUv + texelSize * vec2(0.0, 1.0);
+        vUv2 = vUv + texelSize * vec2(1.0, 1.0);
+        vUv3 = vUv + texelSize * vec2(-1.0, 0.0);
+        vUv4 = vUv + texelSize * vec2(1.0, 0.0);
+        vUv5 = vUv + texelSize * vec2(-1.0, -1.0);
+        vUv6 = vUv + texelSize * vec2(0.0, -1.0);
+        vUv7 = vUv + texelSize * vec2(1.0, -1.0);
+        gl_Position = vec4(position.xy, 1.0, 1.0);
+    }
+`
+
+const UPSAMPLE_FRAGMENT = /* glsl */ `
+    uniform sampler2D inputBuffer;
+    uniform sampler2D supportBuffer;
+    uniform float radius;
+    varying vec2 vUv;
+    varying vec2 vUv0; varying vec2 vUv1; varying vec2 vUv2; varying vec2 vUv3;
+    varying vec2 vUv4; varying vec2 vUv5; varying vec2 vUv6; varying vec2 vUv7;
+    void main() {
+        vec4 c = vec4(0.0);
+        c += texture2D(inputBuffer, vUv0) * 0.0625;
+        c += texture2D(inputBuffer, vUv1) * 0.125;
+        c += texture2D(inputBuffer, vUv2) * 0.0625;
+        c += texture2D(inputBuffer, vUv3) * 0.125;
+        c += texture2D(inputBuffer, vUv) * 0.25;
+        c += texture2D(inputBuffer, vUv4) * 0.125;
+        c += texture2D(inputBuffer, vUv5) * 0.0625;
+        c += texture2D(inputBuffer, vUv6) * 0.125;
+        c += texture2D(inputBuffer, vUv7) * 0.0625;
+        vec4 baseColor = texture2D(supportBuffer, vUv);
+        gl_FragColor = mix(baseColor, c, radius);
+    }
+`
+
+// Bloom (screen blend) + vignette (Eskil technique) + linear→sRGB output.
+const COMPOSITE_FRAGMENT = /* glsl */ `
+    uniform sampler2D inputBuffer;
+    uniform sampler2D bloomBuffer;
+    uniform float intensity;
+    uniform float offset;
+    uniform float darkness;
+    varying vec2 vUv;
+    void main() {
+        vec3 base = texture2D(inputBuffer, vUv).rgb;
+        vec3 bloom = texture2D(bloomBuffer, vUv).rgb * intensity;
+        vec3 color = min(base + bloom - min(base * bloom, vec3(1.0)), vec3(1.0));
+        float d = distance(vUv, vec2(0.5));
+        color *= smoothstep(0.8, offset * 0.799, d * (darkness + offset));
+        gl_FragColor = vec4(color, 1.0);
+        #include <colorspace_fragment>
+    }
+`
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Framer colour values can be hex, rgb(a), or `var(--token, fallback)`. */
+function toColor(value: string | undefined, fallback: string): THREE.Color {
+    const color = new THREE.Color()
+    let css = (value || fallback).trim()
+    const tokenMatch = css.match(/^var\(\s*--[^,]+,\s*(.+)\)$/)
+    if (tokenMatch) css = tokenMatch[1].trim()
+    try {
+        color.setStyle(css)
+    } catch (e) {
+        color.setStyle(fallback)
+    }
+    return color
+}
+
+function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value))
+}
+
+function makeFallbackNoise(): THREE.Texture {
+    const size = 128
+    const data = new Uint8Array(size * size * 4)
+    for (let i = 0; i < data.length; i += 4) {
+        data[i] = Math.random() * 255
+        data[i + 1] = Math.random() * 255
+        data[i + 2] = Math.random() * 255
+        data[i + 3] = 255
+    }
+    const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat)
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+    texture.needsUpdate = true
+    return texture
+}
+
+function makeFallbackMatcap(): THREE.Texture {
+    const size = 256
+    const canvas = document.createElement("canvas")
+    canvas.width = canvas.height = size
+    const ctx = canvas.getContext("2d")
+    if (ctx) {
+        const gradient = ctx.createRadialGradient(size * 0.38, size * 0.35, size * 0.05, size * 0.5, size * 0.5, size * 0.5)
+        gradient.addColorStop(0, "#ffffff")
+        gradient.addColorStop(0.35, "#b9c0c6")
+        gradient.addColorStop(0.85, "#4b5257")
+        gradient.addColorStop(1, "#1a1d20")
+        ctx.fillStyle = gradient
+        ctx.fillRect(0, 0, size, size)
+    }
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.needsUpdate = true
+    return texture
+}
+
+function loadTexture(
+    url: string,
+    onLoad: (texture: THREE.Texture) => void,
+    fallback: () => THREE.Texture
+): { cancel: () => void } {
+    let cancelled = false
+    const loader = new THREE.TextureLoader()
+    loader.setCrossOrigin("anonymous")
+    loader.load(
+        url,
+        (texture) => {
+            if (cancelled) {
+                texture.dispose()
+                return
+            }
+            onLoad(texture)
+        },
+        undefined,
+        () => {
+            if (!cancelled) onLoad(fallback())
+        }
+    )
+    return { cancel: () => (cancelled = true) }
+}
+
+/** 3,000 capsules distributed on a sphere with a golden-angle spiral, pointing inwards. */
+function buildCapsuleGeometry(): THREE.InstancedBufferGeometry {
+    const refGeometry = new THREE.CapsuleGeometry(1, 4, 4, 16)
+    const geometry = new THREE.InstancedBufferGeometry()
+    for (const name in refGeometry.attributes) {
+        geometry.setAttribute(name, refGeometry.attributes[name])
+    }
+    geometry.setIndex(refGeometry.index)
+
+    const positions = new Float32Array(INSTANCES_COUNT * 3)
+    const quaternions = new Float32Array(INSTANCES_COUNT * 4)
+
+    const sphereRadius = 1.5
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+    const up = new THREE.Vector3(0, 1, 0)
+    const tempPos = new THREE.Vector3()
+    const tempQuat = new THREE.Quaternion()
+
+    for (let i = 0, i3 = 0, i4 = 0; i < INSTANCES_COUNT; i++, i3 += 3, i4 += 4) {
+        const y = 1 - (i / (INSTANCES_COUNT - 1)) * 2
+        const radius = Math.sqrt(1 - y * y)
+        const theta = goldenAngle * i
+
+        const x = Math.cos(theta) * radius * sphereRadius
+        const z = Math.sin(theta) * radius * sphereRadius
+        const posY = y * sphereRadius
+
+        positions[i3] = x
+        positions[i3 + 1] = posY
+        positions[i3 + 2] = z
+
+        tempPos.set(-x, -posY, -z).normalize()
+        tempQuat.setFromUnitVectors(up, tempPos)
+
+        quaternions[i4] = tempQuat.x
+        quaternions[i4 + 1] = tempQuat.y
+        quaternions[i4 + 2] = tempQuat.z
+        quaternions[i4 + 3] = tempQuat.w
+    }
+
+    geometry.setAttribute("a_instancePos", new THREE.InstancedBufferAttribute(positions, 3))
+    geometry.setAttribute("a_instanceQuaternions", new THREE.InstancedBufferAttribute(quaternions, 4))
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 3)
+    return geometry
+}
+
+function orbitPosition(t: number, config: (typeof ORBIT_CONFIGS)[number], out: THREE.Vector3): THREE.Vector3 {
+    const angle = config.dir * config.speed * t + config.phase
+    const c = Math.cos(angle) * ORBIT_RADIUS
+    const s = Math.sin(angle) * ORBIT_RADIUS
+    if (config.plane === "xy") return out.set(c, s, 0)
+    if (config.plane === "xz") return out.set(c, 0, s)
+    return out.set(0, c, s)
+}
+
+function makeRenderTarget(options?: THREE.RenderTargetOptions): THREE.WebGLRenderTarget {
+    const target = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false, ...options })
+    target.texture.minFilter = THREE.LinearFilter
+    target.texture.magFilter = THREE.LinearFilter
+    target.texture.generateMipmaps = false
+    return target
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimal orbit controls (rotate by dragging, zoom with wheel / pinch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class OrbitController {
+    enabled = true
+    private theta = 0
+    private phi = Math.PI / 2
+    private radius = 5
+    private targetTheta = 0
+    private targetPhi = Math.PI / 2
+    private targetRadius = 5
+    private pointers = new Map<number, { x: number; y: number }>()
+    private pinchDistance = 0
+    private disposers: Array<() => void> = []
+
+    constructor(private camera: THREE.PerspectiveCamera, private element: HTMLElement) {
+        const spherical = new THREE.Spherical().setFromVector3(camera.position)
+        this.radius = this.targetRadius = spherical.radius
+        this.phi = this.targetPhi = spherical.phi
+        this.theta = this.targetTheta = spherical.theta
+
+        const on = <K extends keyof HTMLElementEventMap>(
+            type: K,
+            handler: (event: HTMLElementEventMap[K]) => void,
+            options?: AddEventListenerOptions
+        ) => {
+            element.addEventListener(type, handler, options)
+            this.disposers.push(() => element.removeEventListener(type, handler, options))
+        }
+
+        on("pointerdown", this.onPointerDown)
+        on("pointermove", this.onPointerMove)
+        on("pointerup", this.onPointerUp)
+        on("pointercancel", this.onPointerUp)
+        on("wheel", this.onWheel, { passive: false })
+    }
+
+    private onPointerDown = (event: PointerEvent) => {
+        if (!this.enabled) return
+        if (event.pointerType === "mouse" && event.button !== 0) return
+        this.element.setPointerCapture(event.pointerId)
+        this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        if (this.pointers.size === 2) this.pinchDistance = this.currentPinchDistance()
+    }
+
+    private onPointerMove = (event: PointerEvent) => {
+        const previous = this.pointers.get(event.pointerId)
+        if (!previous || !this.enabled) return
+        const current = { x: event.clientX, y: event.clientY }
+        this.pointers.set(event.pointerId, current)
+
+        if (this.pointers.size === 1) {
+            const height = this.element.clientHeight || 1
+            this.targetTheta -= (2 * Math.PI * (current.x - previous.x)) / height
+            this.targetPhi -= (2 * Math.PI * (current.y - previous.y)) / height
+            this.targetPhi = clamp(this.targetPhi, 0.05, Math.PI - 0.05)
+        } else if (this.pointers.size === 2) {
+            const distance = this.currentPinchDistance()
+            if (this.pinchDistance > 0) {
+                this.targetRadius = clamp(this.targetRadius * (this.pinchDistance / distance), 2.5, 14)
+            }
+            this.pinchDistance = distance
+        }
+    }
+
+    private onPointerUp = (event: PointerEvent) => {
+        this.pointers.delete(event.pointerId)
+        if (this.element.hasPointerCapture(event.pointerId)) {
+            this.element.releasePointerCapture(event.pointerId)
+        }
+    }
+
+    private onWheel = (event: WheelEvent) => {
+        if (!this.enabled) return
+        event.preventDefault()
+        const scale = Math.pow(0.95, Math.abs(event.deltaY) * 0.01)
+        this.targetRadius = clamp(event.deltaY < 0 ? this.targetRadius * scale : this.targetRadius / scale, 2.5, 14)
+    }
+
+    private currentPinchDistance(): number {
+        const [a, b] = Array.from(this.pointers.values())
+        return Math.hypot(a.x - b.x, a.y - b.y)
+    }
+
+    /** Returns true when the camera moved this frame. */
+    update(): boolean {
+        const damping = 0.18
+        const dTheta = this.targetTheta - this.theta
+        const dPhi = this.targetPhi - this.phi
+        const dRadius = this.targetRadius - this.radius
+        if (Math.abs(dTheta) < 1e-5 && Math.abs(dPhi) < 1e-5 && Math.abs(dRadius) < 1e-5) return false
+        this.theta += dTheta * damping
+        this.phi += dPhi * damping
+        this.radius += dRadius * damping
+        this.camera.position.setFromSphericalCoords(this.radius, this.phi, this.theta)
+        this.camera.lookAt(0, 0, 0)
+        return true
+    }
+
+    dispose() {
+        this.disposers.forEach((fn) => fn())
+        this.disposers = []
+        this.pointers.clear()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The WebGL experience
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SceneParams {
+    backgroundLeft: string
+    backgroundRight: string
+    capsuleColor: string
+    capsuleScale: number
+    speed: number
+    bloomIntensity: number
+    bloomThreshold: number
+    vignette: number
+    interactive: boolean
+    maxPixelRatio: number
+}
+
+interface Experience {
+    setParams: (params: SceneParams) => void
+    resize: () => void
+    start: () => void
+    stop: () => void
+    renderOnce: () => void
+    dispose: () => void
+}
+
+function createExperience(
+    container: HTMLDivElement,
+    initialParams: SceneParams,
+    noiseUrl: string,
+    matcapUrl: string,
+    animate: boolean
+): Experience | null {
+    let renderer: THREE.WebGLRenderer
+    try {
+        renderer = new THREE.WebGLRenderer({
+            powerPreference: "high-performance",
+            antialias: false,
+            stencil: false,
+            alpha: false,
+        })
+    } catch (error) {
+        console.warn("CapsuleOrb: WebGL is not available.", error)
+        return null
+    }
+
+    let params = initialParams
+    const canvas = renderer.domElement
+    canvas.style.position = "absolute"
+    canvas.style.inset = "0"
+    canvas.style.width = "100%"
+    canvas.style.height = "100%"
+    canvas.style.display = "block"
+    container.appendChild(canvas)
+
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    renderer.shadowMap.autoUpdate = false
+    renderer.toneMapping = THREE.NoToneMapping
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.setClearColor(0x000000, 1)
+
+    // ── Scene ────────────────────────────────────────────────────────────────
+    const scene = new THREE.Scene()
+    const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 30)
+    camera.position.set(0, 0, 5)
+    camera.lookAt(0, 0, 0)
+
+    const lightPosition = new THREE.Vector3(-1, 0.8, 0.25).normalize().multiplyScalar(5)
+    const light = new THREE.DirectionalLight(0xffffff, 1)
+    light.position.copy(lightPosition)
+    light.castShadow = true
+    light.shadow.camera.left = -3
+    light.shadow.camera.right = 3
+    light.shadow.camera.top = 3
+    light.shadow.camera.bottom = -3
+    light.shadow.camera.near = 0.1
+    light.shadow.camera.far = 20
+    light.shadow.bias = -0.0001
+    light.shadow.mapSize.set(1024, 1024)
+    light.layers.enable(1)
+    scene.add(light)
+    scene.add(light.target)
+
+    const noiseTexture: { current: THREE.Texture | null } = { current: null }
+    const matcapTexture: { current: THREE.Texture | null } = { current: null }
+
+    const heroUniforms: Record<string, THREE.IUniform> = Object.assign(
+        {
+            u_scale: { value: params.capsuleScale },
+            u_lightPosition: { value: lightPosition },
+            u_noiseTexture: { value: null },
+            u_noiseTexelSize: { value: new THREE.Vector2(1 / 128, 1 / 128) },
+            u_noiseCoordOffset: { value: new THREE.Vector2(0, 0) },
+            u_color: { value: toColor(params.capsuleColor, "#B2B8BB") },
+            u_sphere1Position: { value: new THREE.Vector3() },
+            u_sphere2Position: { value: new THREE.Vector3() },
+            u_sphere3Position: { value: new THREE.Vector3() },
+            u_sphere4Position: { value: new THREE.Vector3() },
+        },
+        THREE.UniformsUtils.merge([THREE.UniformsLib.lights])
+    )
+
+    const sphereUniforms: Record<string, THREE.IUniform> = Object.assign(
+        {
+            u_lightPosition: { value: lightPosition },
+            u_sceneTexture: { value: null },
+            u_matcap: { value: null },
+        },
+        THREE.UniformsUtils.merge([THREE.UniformsLib.lights])
+    )
+
+    const backgroundUniforms = {
+        u_color0: { value: toColor(params.backgroundLeft, "#AEB2B5") },
+        u_color1: { value: toColor(params.backgroundRight, "#939A9D") },
+    }
+
+    // Background gradient (clip-space quad, drawn first, no depth).
+    const backgroundMaterial = new THREE.ShaderMaterial({
+        vertexShader: BACKGROUND_VERTEX,
+        fragmentShader: BACKGROUND_FRAGMENT,
+        uniforms: backgroundUniforms,
+        depthWrite: false,
+        depthTest: false,
+    })
+    const background = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), backgroundMaterial)
+    background.renderOrder = -2
+    background.frustumCulled = false
+    scene.add(background)
+
+    // Dark core sphere.
+    const coreMaterial = new THREE.MeshBasicMaterial({ color: "#111" })
+    const core = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 32), coreMaterial)
+    core.renderOrder = -1
+    scene.add(core)
+
+    // Instanced capsules.
+    const capsuleGeometry = buildCapsuleGeometry()
+    const heroMaterial = new THREE.ShaderMaterial({
+        vertexShader: HERO_VERTEX,
+        fragmentShader: HERO_FRAGMENT,
+        uniforms: heroUniforms,
+        lights: true,
+    })
+    const heroDepthMaterial = new THREE.ShaderMaterial({
+        vertexShader: HERO_VERTEX,
+        fragmentShader: HERO_DEPTH_FRAGMENT,
+        uniforms: heroUniforms,
+        defines: { IS_DEPTH: true },
+    })
+    const hero = new THREE.Mesh(capsuleGeometry, heroMaterial)
+    hero.customDepthMaterial = heroDepthMaterial
+    hero.castShadow = true
+    hero.receiveShadow = true
+    hero.frustumCulled = false
+    scene.add(hero)
+
+    // Glass spheres (layer 1: rendered after the scene has been captured for refraction).
+    const sphereGeometry = new THREE.SphereGeometry(0.3, 32, 32)
+    const sphereMaterial = new THREE.ShaderMaterial({
+        vertexShader: SURFACE_VERTEX,
+        fragmentShader: SPHERE_FRAGMENT,
+        uniforms: sphereUniforms,
+        lights: true,
+    })
+    const spheres = ORBIT_CONFIGS.map(() => {
+        const mesh = new THREE.Mesh(sphereGeometry, sphereMaterial)
+        mesh.renderOrder = 1
+        mesh.receiveShadow = true
+        mesh.layers.set(1)
+        scene.add(mesh)
+        return mesh
+    })
+
+    // Floor shadow catcher (layer 1, transparent).
+    const floorMaterial = new THREE.ShaderMaterial({
+        vertexShader: SURFACE_VERTEX,
+        fragmentShader: FLOOR_FRAGMENT,
+        uniforms: heroUniforms,
+        lights: true,
+        transparent: true,
+    })
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), floorMaterial)
+    floor.rotation.x = -Math.PI / 2
+    floor.position.set(4, -3, -1.5)
+    floor.layers.set(1)
+    scene.add(floor)
+
+    // ── Post-processing ──────────────────────────────────────────────────────
+    const fullscreenScene = new THREE.Scene()
+    const fullscreenCamera = new THREE.Camera()
+    const fullscreenGeometry = new THREE.BufferGeometry()
+    fullscreenGeometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3)
+    )
+    const fullscreenMesh = new THREE.Mesh(fullscreenGeometry)
+    fullscreenMesh.frustumCulled = false
+    fullscreenScene.add(fullscreenMesh)
+
+    const sceneTarget = new THREE.WebGLRenderTarget(1, 1, { samples: 4, depthBuffer: true })
+    sceneTarget.texture.minFilter = THREE.LinearFilter
+    sceneTarget.texture.magFilter = THREE.LinearFilter
+    sceneTarget.texture.generateMipmaps = false
+
+    const kawaseTarget = makeRenderTarget()
+    const blurTarget = makeRenderTarget()
+    const luminanceTarget = makeRenderTarget()
+    const downTargets = Array.from({ length: BLOOM_LEVELS }, () => makeRenderTarget())
+    const upTargets = Array.from({ length: BLOOM_LEVELS - 1 }, () => makeRenderTarget())
+
+    const kawaseMaterial = new THREE.ShaderMaterial({
+        vertexShader: KAWASE_VERTEX,
+        fragmentShader: KAWASE_FRAGMENT,
+        uniforms: {
+            inputBuffer: { value: null },
+            texelSize: { value: new THREE.Vector4() },
+            kernel: { value: 0 },
+        },
+        depthTest: false,
+        depthWrite: false,
+    })
+    const luminanceMaterial = new THREE.ShaderMaterial({
+        vertexShader: FULLSCREEN_VERTEX,
+        fragmentShader: LUMINANCE_FRAGMENT,
+        uniforms: {
+            inputBuffer: { value: null },
+            threshold: { value: params.bloomThreshold },
+            smoothing: { value: 0.01 },
+        },
+        depthTest: false,
+        depthWrite: false,
+    })
+    const downsampleMaterial = new THREE.ShaderMaterial({
+        vertexShader: DOWNSAMPLE_VERTEX,
+        fragmentShader: DOWNSAMPLE_FRAGMENT,
+        uniforms: { inputBuffer: { value: null }, texelSize: { value: new THREE.Vector2() } },
+        depthTest: false,
+        depthWrite: false,
+    })
+    const upsampleMaterial = new THREE.ShaderMaterial({
+        vertexShader: UPSAMPLE_VERTEX,
+        fragmentShader: UPSAMPLE_FRAGMENT,
+        uniforms: {
+            inputBuffer: { value: null },
+            supportBuffer: { value: null },
+            texelSize: { value: new THREE.Vector2() },
+            radius: { value: BLOOM_RADIUS },
+        },
+        depthTest: false,
+        depthWrite: false,
+    })
+    const compositeMaterial = new THREE.ShaderMaterial({
+        vertexShader: FULLSCREEN_VERTEX,
+        fragmentShader: COMPOSITE_FRAGMENT,
+        uniforms: {
+            inputBuffer: { value: null },
+            bloomBuffer: { value: null },
+            intensity: { value: params.bloomIntensity },
+            offset: { value: 0.3 },
+            darkness: { value: params.vignette },
+        },
+        depthTest: false,
+        depthWrite: false,
+    })
+
+    function fullscreenPass(material: THREE.ShaderMaterial, target: THREE.WebGLRenderTarget | null) {
+        fullscreenMesh.material = material
+        renderer.setRenderTarget(target)
+        renderer.render(fullscreenScene, fullscreenCamera)
+    }
+
+    // ── Sizing ───────────────────────────────────────────────────────────────
+    const drawingSize = new THREE.Vector2()
+
+    function resize() {
+        const width = Math.max(1, container.clientWidth)
+        const height = Math.max(1, container.clientHeight)
+        const dpr = clamp(window.devicePixelRatio || 1, 1, params.maxPixelRatio)
+        renderer.setPixelRatio(dpr)
+        renderer.setSize(width, height, false)
+        camera.aspect = width / height
+        camera.updateProjectionMatrix()
+
+        renderer.getDrawingBufferSize(drawingSize)
+        const fullW = Math.max(1, Math.floor(drawingSize.x))
+        const fullH = Math.max(1, Math.floor(drawingSize.y))
+        const halfW = Math.max(1, Math.round(fullW / 2))
+        const halfH = Math.max(1, Math.round(fullH / 2))
+
+        sceneTarget.setSize(fullW, fullH)
+        kawaseTarget.setSize(halfW, halfH)
+        blurTarget.setSize(halfW, halfH)
+        kawaseMaterial.uniforms.texelSize.value.set(1 / fullW, 1 / fullH, 0.5 / fullW, 0.5 / fullH)
+        luminanceTarget.setSize(halfW, halfH)
+
+        let w = halfW
+        let h = halfH
+        for (let i = 0; i < BLOOM_LEVELS; i++) {
+            w = Math.max(1, Math.round(w / 2))
+            h = Math.max(1, Math.round(h / 2))
+            downTargets[i].setSize(w, h)
+            if (i < upTargets.length) upTargets[i].setSize(w, h)
+        }
+    }
+
+    // ── Textures ─────────────────────────────────────────────────────────────
+    const noiseLoad = loadTexture(
+        noiseUrl,
+        (texture) => {
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping
+            texture.needsUpdate = true
+            noiseTexture.current = texture
+            heroUniforms.u_noiseTexture.value = texture
+            const image = texture.image as { width?: number; height?: number } | undefined
+            if (image && image.width && image.height) {
+                heroUniforms.u_noiseTexelSize.value.set(1 / image.width, 1 / image.height)
+            }
+            if (!animate) renderOnce()
+        },
+        makeFallbackNoise
+    )
+    const matcapLoad = loadTexture(
+        matcapUrl,
+        (texture) => {
+            matcapTexture.current = texture
+            sphereUniforms.u_matcap.value = texture
+            if (!animate) renderOnce()
+        },
+        makeFallbackMatcap
+    )
+
+    // ── Controls ─────────────────────────────────────────────────────────────
+    const controls = new OrbitController(camera, container)
+    controls.enabled = params.interactive
+
+    // ── Frame ────────────────────────────────────────────────────────────────
+    let time = 0
+    const tempVector = new THREE.Vector3()
+    const spherePositionUniforms = [
+        heroUniforms.u_sphere1Position,
+        heroUniforms.u_sphere2Position,
+        heroUniforms.u_sphere3Position,
+        heroUniforms.u_sphere4Position,
+    ]
+
+    function renderFrame(delta: number) {
+        time += delta * params.speed
+        controls.update()
+
+        for (let i = 0; i < spheres.length; i++) {
+            orbitPosition(time, ORBIT_CONFIGS[i], tempVector)
+            spheres[i].position.copy(tempVector)
+            spherePositionUniforms[i].value.copy(tempVector)
+        }
+        heroUniforms.u_noiseCoordOffset.value.set(Math.random(), Math.random())
+
+        // 1. Opaque scene (background, core, capsules) into the multisampled buffer.
+        renderer.shadowMap.needsUpdate = true
+        renderer.autoClear = true
+        camera.layers.set(0)
+        renderer.setRenderTarget(sceneTarget)
+        renderer.render(scene, camera)
+
+        // 2. Blur a half-resolution copy for the glass refraction.
+        kawaseMaterial.uniforms.inputBuffer.value = sceneTarget.texture
+        fullscreenPass(kawaseMaterial, kawaseTarget)
+        kawaseMaterial.uniforms.inputBuffer.value = kawaseTarget.texture
+        fullscreenPass(kawaseMaterial, blurTarget)
+        sphereUniforms.u_sceneTexture.value = blurTarget.texture
+
+        // 3. Glass spheres + floor shadow on top, keeping the depth buffer.
+        renderer.autoClear = false
+        camera.layers.set(1)
+        renderer.setRenderTarget(sceneTarget)
+        renderer.render(scene, camera)
+        renderer.autoClear = true
+
+        // 4. Bloom: threshold, 8-level downsample, tent upsample.
+        luminanceMaterial.uniforms.inputBuffer.value = sceneTarget.texture
+        fullscreenPass(luminanceMaterial, luminanceTarget)
+
+        let previous: THREE.WebGLRenderTarget = luminanceTarget
+        for (let i = 0; i < BLOOM_LEVELS; i++) {
+            downsampleMaterial.uniforms.texelSize.value.set(1 / previous.width, 1 / previous.height)
+            downsampleMaterial.uniforms.inputBuffer.value = previous.texture
+            fullscreenPass(downsampleMaterial, downTargets[i])
+            previous = downTargets[i]
+        }
+        for (let i = BLOOM_LEVELS - 2; i >= 0; i--) {
+            upsampleMaterial.uniforms.texelSize.value.set(1 / previous.width, 1 / previous.height)
+            upsampleMaterial.uniforms.inputBuffer.value = previous.texture
+            upsampleMaterial.uniforms.supportBuffer.value = downTargets[i].texture
+            fullscreenPass(upsampleMaterial, upTargets[i])
+            previous = upTargets[i]
+        }
+
+        // 5. Composite bloom + vignette to the screen in sRGB.
+        compositeMaterial.uniforms.inputBuffer.value = sceneTarget.texture
+        compositeMaterial.uniforms.bloomBuffer.value = upTargets[0].texture
+        fullscreenPass(compositeMaterial, null)
+    }
+
+    // ── Loop ─────────────────────────────────────────────────────────────────
+    let rafId = 0
+    let running = false
+    let visible = true
+    let lastTime = 0
+    let disposed = false
+
+    function loop(now: number) {
+        if (!running || disposed) return
+        rafId = requestAnimationFrame(loop)
+        const delta = lastTime ? Math.min((now - lastTime) / 1000, 0.1) : 0
+        lastTime = now
+        renderFrame(delta)
+    }
+
+    function start() {
+        if (running || disposed || !visible) return
+        running = true
+        lastTime = 0
+        rafId = requestAnimationFrame(loop)
+    }
+
+    function stop() {
+        running = false
+        cancelAnimationFrame(rafId)
+    }
+
+    function renderOnce() {
+        if (disposed) return
+        renderFrame(0)
+    }
+
+    const intersection =
+        typeof IntersectionObserver !== "undefined"
+            ? new IntersectionObserver((entries) => {
+                  visible = entries.some((entry) => entry.isIntersecting)
+                  if (!animate) return
+                  if (visible) start()
+                  else stop()
+              })
+            : null
+    intersection?.observe(container)
+
+    const onContextLost = (event: Event) => {
+        event.preventDefault()
+        stop()
+    }
+    const onContextRestored = () => {
+        if (animate) start()
+        else renderOnce()
+    }
+    canvas.addEventListener("webglcontextlost", onContextLost)
+    canvas.addEventListener("webglcontextrestored", onContextRestored)
+
+    resize()
+
+    return {
+        setParams(next) {
+            params = next
+            controls.enabled = next.interactive
+            heroUniforms.u_scale.value = next.capsuleScale
+            heroUniforms.u_color.value = toColor(next.capsuleColor, "#B2B8BB")
+            backgroundUniforms.u_color0.value = toColor(next.backgroundLeft, "#AEB2B5")
+            backgroundUniforms.u_color1.value = toColor(next.backgroundRight, "#939A9D")
+            compositeMaterial.uniforms.intensity.value = next.bloomIntensity
+            compositeMaterial.uniforms.darkness.value = next.vignette
+            luminanceMaterial.uniforms.threshold.value = next.bloomThreshold
+        },
+        resize,
+        start,
+        stop,
+        renderOnce,
+        dispose() {
+            disposed = true
+            stop()
+            noiseLoad.cancel()
+            matcapLoad.cancel()
+            intersection?.disconnect()
+            controls.dispose()
+            canvas.removeEventListener("webglcontextlost", onContextLost)
+            canvas.removeEventListener("webglcontextrestored", onContextRestored)
+
+            capsuleGeometry.dispose()
+            sphereGeometry.dispose()
+            core.geometry.dispose()
+            background.geometry.dispose()
+            floor.geometry.dispose()
+            fullscreenGeometry.dispose()
+            ;[
+                heroMaterial,
+                heroDepthMaterial,
+                sphereMaterial,
+                floorMaterial,
+                backgroundMaterial,
+                coreMaterial,
+                kawaseMaterial,
+                luminanceMaterial,
+                downsampleMaterial,
+                upsampleMaterial,
+                compositeMaterial,
+            ].forEach((material) => material.dispose())
+            ;[sceneTarget, kawaseTarget, blurTarget, luminanceTarget, ...downTargets, ...upTargets].forEach(
+                (target) => target.dispose()
+            )
+            noiseTexture.current?.dispose()
+            matcapTexture.current?.dispose()
+            light.shadow.dispose()
+            renderer.dispose()
+            renderer.forceContextLoss()
+            if (canvas.parentNode === container) container.removeChild(canvas)
+        },
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Framer component
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ResponsiveImageValue {
+    src?: string
+    srcSet?: string
+    alt?: string
+}
+
+interface CapsuleOrbProps {
+    backgroundLeft: string
+    backgroundRight: string
+    capsuleColor: string
+    capsuleScale: number
+    speed: number
+    bloomIntensity: number
+    bloomThreshold: number
+    vignette: number
+    interactive: boolean
+    maxPixelRatio: number
+    animateOnCanvas: boolean
+    noiseImage?: ResponsiveImageValue
+    matcapImage?: ResponsiveImageValue
+    style?: CSSProperties
+}
+
+/**
+ * @framerSupportedLayoutWidth any-prefer-fixed
+ * @framerSupportedLayoutHeight any-prefer-fixed
+ * @framerIntrinsicWidth 800
+ * @framerIntrinsicHeight 600
+ */
+export default function CapsuleOrb(props: CapsuleOrbProps) {
+    const {
+        backgroundLeft = "#AEB2B5",
+        backgroundRight = "#939A9D",
+        capsuleColor = "#B2B8BB",
+        capsuleScale = 0.06,
+        speed = 1,
+        bloomIntensity = 2,
+        bloomThreshold = 0.65,
+        vignette = 0.6,
+        interactive = true,
+        maxPixelRatio = 1.5,
+        animateOnCanvas = false,
+        noiseImage,
+        matcapImage,
+        style,
+    } = props
+
+    const isStatic = useIsStaticRenderer()
+    const animate = !isStatic || animateOnCanvas
+    const noiseUrl = noiseImage?.src || DEFAULT_NOISE_URL
+    const matcapUrl = matcapImage?.src || DEFAULT_MATCAP_URL
+
+    const containerRef = useRef<HTMLDivElement>(null)
+    const experienceRef = useRef<Experience | null>(null)
+
+    const params: SceneParams = {
+        backgroundLeft,
+        backgroundRight,
+        capsuleColor,
+        capsuleScale,
+        speed,
+        bloomIntensity,
+        bloomThreshold,
+        vignette,
+        interactive,
+        maxPixelRatio,
+    }
+    const paramsRef = useRef(params)
+    paramsRef.current = params
+
+    // Build (and tear down) the WebGL scene.
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container || typeof window === "undefined") return
+
+        const experience = createExperience(container, paramsRef.current, noiseUrl, matcapUrl, animate)
+        if (!experience) return
+        experienceRef.current = experience
+
+        const resizeObserver =
+            typeof ResizeObserver !== "undefined"
+                ? new ResizeObserver(() => {
+                      experience.resize()
+                      if (!animate) experience.renderOnce()
+                  })
+                : null
+        resizeObserver?.observe(container)
+
+        if (animate) experience.start()
+        else experience.renderOnce()
+
+        return () => {
+            resizeObserver?.disconnect()
+            experience.dispose()
+            experienceRef.current = null
+        }
+    }, [noiseUrl, matcapUrl, animate])
+
+    // Push property changes into the running scene without rebuilding it.
+    useEffect(() => {
+        const experience = experienceRef.current
+        if (!experience) return
+        experience.setParams(paramsRef.current)
+        experience.resize()
+        if (!animate) experience.renderOnce()
+    }, [
+        backgroundLeft,
+        backgroundRight,
+        capsuleColor,
+        capsuleScale,
+        speed,
+        bloomIntensity,
+        bloomThreshold,
+        vignette,
+        interactive,
+        maxPixelRatio,
+        animate,
+    ])
+
+    return (
+        <div
+            ref={containerRef}
+            style={{
+                position: "relative",
+                width: "100%",
+                height: "100%",
+                overflow: "hidden",
+                background: backgroundLeft,
+                touchAction: interactive ? "none" : "auto",
+                cursor: interactive ? "grab" : "default",
+                ...style,
+            }}
+        />
+    )
+}
+
+addPropertyControls(CapsuleOrb, {
+    backgroundLeft: {
+        type: ControlType.Color,
+        title: "Background L",
+        defaultValue: "#AEB2B5",
+    },
+    backgroundRight: {
+        type: ControlType.Color,
+        title: "Background R",
+        defaultValue: "#939A9D",
+    },
+    capsuleColor: {
+        type: ControlType.Color,
+        title: "Capsules",
+        defaultValue: "#B2B8BB",
+    },
+    capsuleScale: {
+        type: ControlType.Number,
+        title: "Capsule Size",
+        defaultValue: 0.06,
+        min: 0.02,
+        max: 0.12,
+        step: 0.005,
+    },
+    speed: {
+        type: ControlType.Number,
+        title: "Speed",
+        defaultValue: 1,
+        min: 0,
+        max: 3,
+        step: 0.05,
+    },
+    bloomIntensity: {
+        type: ControlType.Number,
+        title: "Bloom",
+        defaultValue: 2,
+        min: 0,
+        max: 5,
+        step: 0.1,
+    },
+    bloomThreshold: {
+        type: ControlType.Number,
+        title: "Bloom Cutoff",
+        defaultValue: 0.65,
+        min: 0,
+        max: 1,
+        step: 0.01,
+    },
+    vignette: {
+        type: ControlType.Number,
+        title: "Vignette",
+        defaultValue: 0.6,
+        min: 0,
+        max: 1,
+        step: 0.05,
+    },
+    interactive: {
+        type: ControlType.Boolean,
+        title: "Orbit",
+        defaultValue: true,
+        enabledTitle: "Drag",
+        disabledTitle: "Off",
+    },
+    maxPixelRatio: {
+        type: ControlType.Number,
+        title: "Max DPR",
+        defaultValue: 1.5,
+        min: 1,
+        max: 2,
+        step: 0.25,
+    },
+    animateOnCanvas: {
+        type: ControlType.Boolean,
+        title: "On Canvas",
+        defaultValue: false,
+        enabledTitle: "Animate",
+        disabledTitle: "Static",
+    },
+    noiseImage: {
+        type: ControlType.ResponsiveImage,
+        title: "Noise",
+    },
+    matcapImage: {
+        type: ControlType.ResponsiveImage,
+        title: "Matcap",
+    },
+})
