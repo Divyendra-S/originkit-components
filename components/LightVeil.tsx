@@ -1116,6 +1116,7 @@ interface LightVeilProps {
     animateOnCanvas: boolean
     // Colour
     colorMode: "cycle" | "color" | "mono"
+    colorSpeed: number
     cycle: VeilCycle
     monoLift: number
     background: string
@@ -1155,6 +1156,7 @@ export default function LightVeil(props: LightVeilProps) {
         drift = 1,
         animateOnCanvas = false,
         colorMode = "cycle",
+        colorSpeed = BASE_SPEED,
         cycle = DEFAULT_CYCLE,
         monoLift = 0.62,
         background = DEFAULT_BACKGROUND,
@@ -1171,8 +1173,14 @@ export default function LightVeil(props: LightVeilProps) {
     // The grouped control arrives as an object and the speed dial as 0-100. Both
     // are read defensively: a partial object, or a number the host handed over as
     // a string, falls back to the shader's own value.
-    const cyclePeriod = clamp(num(cycle?.period, DEFAULT_CYCLE.period), 2, 60)
-    const cycleFade = clamp(num(cycle?.fade, DEFAULT_CYCLE.fade), 0.2, 12)
+    // Color Speed is a 0-100 dial over the cycle timings. It is squared so the
+    // top of the dial is four times the natural pace and the bottom quarter is a
+    // slow drift; at 0 the cycle stops and the scene simply holds its colour.
+    const colorRate = Math.pow(clamp(num(colorSpeed, BASE_SPEED), 0, 100) / BASE_SPEED, 2)
+    const cycleScale = 1 / Math.max(colorRate, 0.05)
+    const cyclePeriod = clamp(num(cycle?.period, DEFAULT_CYCLE.period) * cycleScale, 2, 600)
+    const cycleFade = clamp(num(cycle?.fade, DEFAULT_CYCLE.fade) * cycleScale, 0.2, 60)
+    const veilColorMode = colorMode === "cycle" && colorRate === 0 ? "color" : colorMode
     const veilSpeed = clamp(num(speed, BASE_SPEED), 0, 200) / BASE_SPEED
     // Turn rate. No cap beyond taste: an angle wraps, so the turn is seamless
     // at any rate.
@@ -1210,7 +1218,7 @@ export default function LightVeil(props: LightVeilProps) {
         curve: veilCurve,
         // Negative turns the drum clockwise seen from above: near side right to left.
         direction: clockwise ? -1 : 1,
-        colorMode,
+        colorMode: veilColorMode,
         cyclePeriod,
         cycleFade,
         monoLift,
@@ -1278,7 +1286,7 @@ export default function LightVeil(props: LightVeilProps) {
         clockwise,
         breath,
         drift,
-        colorMode,
+        veilColorMode,
         cyclePeriod,
         cycleFade,
         monoLift,
@@ -1311,61 +1319,74 @@ export default function LightVeil(props: LightVeilProps) {
 addPropertyControls(LightVeil, {
     // Ordered the way the rest of the kit orders a panel: the background and the
     // palette first, then the numbers most people reach for, then the finish.
+    // Titles are plain words, as on Capsule Orb — Density, Speed, Brightness —
+    // rather than the shader's own names.
     //
     // Kept deliberately small. Every other knob the shader supports still exists
     // as a prop with a default — see the destructuring in LightVeil — it just
     // isn't worth a row in the panel. `seed` is one of them: the structure is
     // meant to be the one structure, so it is fixed at its default rather than
-    // offered as a reshuffle. `cycle` and `animateOnCanvas` are two more: the
-    // cycle timings confused more than they helped, and the canvas switch is a
-    // Framer-only concern, so both stay at their defaults unless set in code.
+    // offered as a reshuffle. `sweep`, `cycle` and `animateOnCanvas` are three
+    // more: the turn rate and the cycle timings confused more than they helped
+    // (Color Speed covers the one people wanted), and the canvas switch is a
+    // Framer-only concern, so all stay at their defaults unless set in code.
     //
     // `colorMode` is the only Enum, and its options are strings on purpose: an
     // Enum whose options are numbers loses them outside Framer (option lists are
     // read as strings), and the component then receives "" where it expected a
     // number. That is how `Quality` once produced a 1x1 canvas.
 
-    // ── Colour ─────────────────────────────────────────────────────
+    // ── Colors ─────────────────────────────────────────────────────
     background: {
         type: ControlType.Color,
         title: "Background",
-        description: "The dark ground the lights sit on.",
+        description: "The dark colour behind the lights.",
         defaultValue: DEFAULT_BACKGROUND,
     },
     coolA: {
         type: ControlType.Color,
         title: "Base Color",
-        description: "The colour most of the columns are drawn from.",
+        description: "The main colour of the lights.",
         defaultValue: DEFAULT_COOL_A,
     },
     coolB: {
         type: ControlType.Color,
         title: "Accent Color",
-        description: "The colour the dimmer columns fall back to. Columns mix between the two.",
+        description: "A second colour the dimmer lights lean towards.",
         defaultValue: DEFAULT_COOL_B,
     },
     warmA: {
         type: ControlType.Color,
         title: "Warm Color",
-        description: "The colour of the warm glows underneath.",
+        description: "The colour of the warm glows low in the frame.",
         defaultValue: DEFAULT_WARM_A,
         hidden: (props: LightVeilProps) => props.warmCount === 0,
     },
     colorMode: {
         type: ControlType.Enum,
-        title: "Mode",
-        description: "Cycle drains to grayscale and back; Colour and Mono hold one look.",
+        title: "Color Mode",
+        description: "Cycle fades between white and colour. Colour and Mono hold one look.",
         defaultValue: "cycle",
         options: ["cycle", "color", "mono"],
         optionTitles: ["Cycle", "Colour", "Mono"],
         displaySegmentedControl: true,
     },
+    colorSpeed: {
+        type: ControlType.Number,
+        title: "Color Speed",
+        description: "How fast the scene fades from white to colour and back. 50 is the natural pace, 0 stays in colour.",
+        defaultValue: BASE_SPEED,
+        min: 0,
+        max: 100,
+        step: 1,
+        hidden: (props: LightVeilProps) => props.colorMode !== "cycle",
+    },
 
-    // ── Composition ────────────────────────────────────────────────
+    // ── Form ───────────────────────────────────────────────────────
     coolCount: {
         type: ControlType.Number,
         title: "Density",
-        description: "How much light fills the field. Scales the haze, the bands and the streaks together.",
+        description: "How many lights fill the frame.",
         defaultValue: BASE_DENSITY,
         min: 4,
         max: 24,
@@ -1375,7 +1396,7 @@ addPropertyControls(LightVeil, {
     warmCount: {
         type: ControlType.Number,
         title: "Warm Lights",
-        description: "How many dim red and amber glows surface inside the green clumps.",
+        description: "How many warm glows appear among the lights.",
         defaultValue: 8,
         min: 0,
         max: MAX_WARM_LIGHTS,
@@ -1385,7 +1406,7 @@ addPropertyControls(LightVeil, {
     softness: {
         type: ControlType.Number,
         title: "Softness",
-        description: "How far each light diffuses. Low is a sharp shaft, high is a wide haze.",
+        description: "How blurred each light is. Low is crisp, high is a soft haze.",
         defaultValue: 1,
         min: 0.4,
         max: 2.5,
@@ -1394,7 +1415,7 @@ addPropertyControls(LightVeil, {
     intensity: {
         type: ControlType.Number,
         title: "Brightness",
-        description: "Overall strength of the light field.",
+        description: "How bright the whole scene is.",
         defaultValue: 1,
         min: 0,
         max: 2.5,
@@ -1402,32 +1423,23 @@ addPropertyControls(LightVeil, {
     },
 
     // ── Motion ─────────────────────────────────────────────────────
-    sweep: {
-        type: ControlType.Number,
-        title: "Travel",
-        description: "How fast the drum turns. Always the same way round, so a clump comes forward, goes back behind the core and comes round again.",
-        defaultValue: DEFAULT_SWEEP,
-        min: 0,
-        max: 1.2,
-        step: 0.02,
-    },
-    curve: {
-        type: ControlType.Number,
-        title: "Depth",
-        description: "How much nearer the front of the turn is than the back. Low is a flat wheel; high makes the near side larger, brighter and faster, and packs the far side tighter behind the core.",
-        defaultValue: DEFAULT_CURVE,
-        min: 0.02,
-        max: 1,
-        step: 0.02,
-    },
     speed: {
         type: ControlType.Number,
         title: "Speed",
-        description: "How fast the frame sweeps, and how fast the field breathes with it. 50 is the natural pace.",
+        description: "How fast the lights move and turn. 50 is the natural pace.",
         defaultValue: BASE_SPEED,
         min: 0,
         max: 100,
         step: 1,
+    },
+    curve: {
+        type: ControlType.Number,
+        title: "Depth",
+        description: "How much the lights swell as they come to the front. Low is flat, high is deep.",
+        defaultValue: DEFAULT_CURVE,
+        min: 0.02,
+        max: 1,
+        step: 0.02,
     },
 
     // ── Finish ─────────────────────────────────────────────────────

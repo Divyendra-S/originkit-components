@@ -108,34 +108,36 @@ Framer code component — no imports beyond React and Framer.
 ### API Reference
 
 All props map directly to the controls panel sliders and color pickers, ordered
-palette first, then composition, then motion, then the finish.
+colors first, then form, then motion, then the finish. Panel titles are plain
+words, as on Capsule Orb; where a title differs from the prop name the table
+says so.
 
-#### COLOUR
-
-| Props | Type | Default | Description |
-| --- | --- | --- | --- |
-| `background` | color | `#03080B` | The near-black the lights float in. |
-| `coolA` | color | `#1BE087` | The colour most of the lights are drawn from. |
-| `coolB` | color | `#0A6B60` | The colour the dimmer lights and the broad haze fall back to. |
-| `warmA` | color | `#C2264F` | The colour of the warm glows underneath. |
-| `colorMode` | enum | `cycle` | Cycle drains to grayscale and back; Colour and Mono hold one look. |
-
-#### COMPOSITION
+#### COLORS
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `coolCount` | number | `16` | How much light fills the field. Scales the haze, the bands and the streaks together. |
-| `warmCount` | number | `8` | How many dim red and amber glows surface inside the green clusters. |
-| `softness` | number | `1` | How far each light diffuses. Low is a sharp shaft, high is a wide haze. |
-| `intensity` | number | `1` | Overall strength of the light field. |
+| `background` | color | `#03080B` | The dark colour behind the lights. |
+| `coolA` | color | `#1BE087` | The main colour of the lights. Shown as **Base Color**. |
+| `coolB` | color | `#0A6B60` | A second colour the dimmer lights lean towards. Shown as **Accent Color**. |
+| `warmA` | color | `#C2264F` | The colour of the warm glows low in the frame. Shown as **Warm Color**. |
+| `colorMode` | enum | `cycle` | Cycle fades between white and colour; Colour and Mono hold one look. Shown as **Color Mode**. |
+| `colorSpeed` | number | `50` | How fast the scene fades from white to colour and back. 50 is the natural pace, 0 stays in colour. Only in Cycle mode. Shown as **Color Speed**. |
+
+#### FORM
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `coolCount` | number | `16` | How many lights fill the frame. Shown as **Density**. |
+| `warmCount` | number | `8` | How many warm glows appear among the lights. Shown as **Warm Lights**. |
+| `softness` | number | `1` | How blurred each light is. Low is crisp, high is a soft haze. |
+| `intensity` | number | `1` | How bright the whole scene is. Shown as **Brightness**. |
 
 #### MOTION
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `sweep` | number | `0.28` | How fast the drum turns. Always the same way round, so a cluster comes forward, goes back behind the core and comes round again. Shown as **Travel**. |
-| `curve` | number | `0.9` | How much nearer the front of the turn is than the back. Low is a flat wheel; high makes the near side larger, brighter and faster, and packs the far side tighter behind the core. Shown as **Depth**. |
-| `speed` | number | `50` | How fast the frame sweeps, and how fast the field breathes with it. 50 is the natural pace. |
+| `speed` | number | `50` | How fast the lights move and turn. 50 is the natural pace. |
+| `curve` | number | `0.9` | How much the lights swell as they come to the front. Low is flat, high is deep. Shown as **Depth**. |
 
 #### FINISH
 
@@ -145,15 +147,20 @@ palette first, then composition, then motion, then the finish.
 
 ### Props without a control
 
-`seed` `37` · `cycle` `{ period: 16, fade: 2.4 }` · `animateOnCanvas` `false` ·
-`clockwise` `true` · `warmAmount` `0.72` · `haze` `0.7` · `falloff` `0.8` ·
+`seed` `37` · `sweep` `0.28` · `cycle` `{ period: 16, fade: 2.4 }` ·
+`animateOnCanvas` `false` · `clockwise` `true` · `warmAmount` `0.72` · `haze` `0.7` · `falloff` `0.8` ·
 `breath` `0.55` · `drift` `1` · `monoLift` `0.62` · `warmB` `#E08A2A` ·
 `grain` `0.014` · `maxPixelRatio` `1`
 
-`cycle` is the timing of the Cycle colour mode: `period` seconds for one round
-trip through grayscale and back, `fade` seconds for the drain and the flood. It
-only applies in that mode, and the defaults give the seamless loop the
-reference has, so it no longer takes a row in the panel.
+`sweep` is how fast the drum turns, in turns per second at the default speed.
+It only ever confused next to Speed, so the panel keeps Speed and the turn
+rate stays at the pace the reference has.
+
+`cycle` is the base timing of the Cycle colour mode: `period` seconds for one
+round trip through grayscale and back, `fade` seconds for the drain and the
+flood. **Color Speed** scales both: it is squared, so 100 is four times the
+base pace, 25 a quarter of it, and 0 stops the cycle and holds colour. The
+raw timings only apply in that mode and no longer take a row in the panel.
 
 `animateOnCanvas` keeps the animation running on the Framer canvas. At its
 default the canvas shows one static frame and the component animates in
