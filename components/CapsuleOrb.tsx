@@ -41,6 +41,18 @@ const ORBIT_CONFIGS = [
 const SPHERE_RADIUS = 1.5
 const BASE_ORB_SIZE = 0.3
 
+/** What 100% means on the two size controls: the capsule thickness they scale from. */
+const BASE_CAPSULE_SCALE = 0.06
+
+/** Speed is a 0-100 dial; this is where it sits at 1x, so it can be halved or doubled. */
+const BASE_SPEED = 50
+
+const DEFAULT_BACKGROUND = "#AEB2B5"
+
+/** Defaults for the two grouped controls, also used when one of their fields arrives missing. */
+const DEFAULT_SHADOW = { strength: 0.6, contact: 0.3 }
+const DEFAULT_GLASS = { refraction: 1.45, thickness: 0.6 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scene shaders (verbatim from the original, with the shared PCF shadow code
 // factored into one chunk)
@@ -627,6 +639,16 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * The far stop of the background ramp. The panel exposes one background colour;
+ * the gradient keeps its depth by darkening that colour rather than asking for a
+ * second one. The multiply lands in linear space, which is why the factor reads
+ * lower than the sRGB pair it replaces (#AEB2B5 -> #939A9D).
+ */
+function shadeColor(value: string | undefined, shade: number): THREE.Color {
+    return toColor(value, DEFAULT_BACKGROUND).multiplyScalar(clamp(num(shade, 0.7), 0, 1))
+}
+
+/**
  * A number, or the fallback when the prop arrived as something else.
  *
  * Outside Framer a control can hand over a value of the wrong type — an empty
@@ -635,7 +657,13 @@ function clamp(value: number, min: number, max: number): number {
  * drawing buffer and a black canvas, which is a very confusing way to find out.
  */
 function num(value: unknown, fallback: number): number {
-    const n = typeof value === "number" ? value : Number(value)
+    if (typeof value === "number") return Number.isFinite(value) ? value : fallback
+    // `Number("")` and `Number(null)` are both 0 — finite, and so silently
+    // accepted by the check below. Those are exactly the values a host hands over
+    // when it has nothing, so they have to be rejected before the coercion.
+    if (value == null) return fallback
+    if (typeof value === "string" && value.trim() === "") return fallback
+    const n = Number(value)
     return Number.isFinite(n) ? n : fallback
 }
 
@@ -868,6 +896,11 @@ class OrbitController {
         return Math.hypot(a.x - b.x, a.y - b.y)
     }
 
+    /** Where the camera currently sits around Y, in radians. */
+    get azimuth(): number {
+        return this.theta
+    }
+
     /** Distance from the origin. Ignored while the pointer is down. */
     setDistance(radius: number) {
         if (this.pointers.size > 0) return
@@ -930,8 +963,8 @@ interface SceneParams {
     interactive: boolean
     allowZoom: boolean
     // Colors
-    backgroundLeft: string
-    backgroundRight: string
+    background: string
+    backgroundShade: number
     gradientAngle: number
     capsuleColor: string
     coreColor: string
@@ -1057,8 +1090,8 @@ function createExperience(
     )
 
     const backgroundUniforms = {
-        u_color0: { value: toColor(params.backgroundLeft, "#AEB2B5") },
-        u_color1: { value: toColor(params.backgroundRight, "#939A9D") },
+        u_color0: { value: toColor(params.background, DEFAULT_BACKGROUND) },
+        u_color1: { value: shadeColor(params.background, params.backgroundShade) },
         u_angle: { value: params.gradientAngle },
     }
 
@@ -1133,7 +1166,13 @@ function createExperience(
     floor.position.set(4, -3, -1.5)
     floor.visible = params.contactShadow > 0
     floor.layers.set(1)
-    scene.add(floor)
+    // The catcher is an 8x8 slab parked off to one side, sized and placed for
+    // the opening view. Left in world space it swings out of frame as the
+    // camera comes round, taking the drop shadow with it — so it hangs off the
+    // same pivot as the light and stays where the viewer put it.
+    const floorPivot = new THREE.Group()
+    floorPivot.add(floor)
+    scene.add(floorPivot)
 
     // ── Post-processing ──────────────────────────────────────────────────────
     const fullscreenScene = new THREE.Scene()
@@ -1285,6 +1324,27 @@ function createExperience(
     controls.zoomEnabled = params.allowZoom
     controls.autoRotate = params.autoRotate ? params.autoRotateSpeed : 0
 
+    /**
+     * Aim the key light — and the slab that catches its shadow — with the
+     * azimuth measured from the camera instead of from the world.
+     *
+     * The orb never turns — auto-rotate walks the camera around it. So a light
+     * fixed in world space stays put while the viewpoint moves, and on screen
+     * that reads backwards: the lit side, and every shadow with it, slides
+     * around the orb as it spins, as though the lamp were the thing rotating.
+     * Carrying the light along with the camera's own azimuth pins it where the
+     * viewer sees it, and the capsules turn through a beam that holds still.
+     *
+     * Height stays in world space on purpose — dragging up and down should let
+     * you look under a light that remains overhead.
+     */
+    function syncLight() {
+        const cameraAngle = (controls.azimuth * 180) / Math.PI
+        lightVector(params.lightAngle - cameraAngle, params.lightHeight, lightPosition)
+        light.position.copy(lightPosition)
+        floorPivot.rotation.y = controls.azimuth
+    }
+
     // ── Frame ────────────────────────────────────────────────────────────────
     let time = 0
     const tempVector = new THREE.Vector3()
@@ -1298,6 +1358,7 @@ function createExperience(
     function renderFrame(delta: number) {
         time += delta * params.speed
         controls.update(delta)
+        syncLight()
 
         for (let i = 0; i < spheres.length; i++) {
             if (i >= params.orbCount) {
@@ -1444,13 +1505,12 @@ function createExperience(
             heroUniforms.u_color.value = toColor(next.capsuleColor, "#B2B8BB")
             coreMaterial.color = toColor(next.coreColor, "#111111")
             sphereUniforms.u_glassTint.value = toColor(next.glassTint, "#FFFFFF")
-            backgroundUniforms.u_color0.value = toColor(next.backgroundLeft, "#AEB2B5")
-            backgroundUniforms.u_color1.value = toColor(next.backgroundRight, "#939A9D")
+            backgroundUniforms.u_color0.value = toColor(next.background, DEFAULT_BACKGROUND)
+            backgroundUniforms.u_color1.value = shadeColor(next.background, next.backgroundShade)
             backgroundUniforms.u_angle.value = next.gradientAngle
 
             // Light & shadow — both materials share the one lightPosition vector.
-            lightVector(next.lightAngle, next.lightHeight, lightPosition)
-            light.position.copy(lightPosition)
+            syncLight()
             heroUniforms.u_shadowStrength.value = next.shadowStrength
             heroUniforms.u_contactShadow.value = next.contactShadow
             floor.visible = next.contactShadow > 0
@@ -1522,39 +1582,47 @@ interface ResponsiveImageValue {
     alt?: string
 }
 
+/** The two grouped controls. Each renders as one row summarising its fields. */
+interface OrbShadow {
+    strength: number
+    contact: number
+}
+
+interface OrbGlass {
+    refraction: number
+    thickness: number
+}
+
 interface CapsuleOrbProps {
-    // Layout
-    capsuleCount: number
-    capsuleScale: number
-    bulge: number
-    dentSize: number
-    orbCount: number
-    orbSize: number
-    orbDistance: number
-    distance: number
-    // Animation
-    speed: number
-    autoRotate: boolean
-    autoRotateSpeed: number
-    animateOnCanvas: boolean
-    // Interaction
-    interactive: boolean
-    allowZoom: boolean
     // Colors
-    backgroundLeft: string
-    backgroundRight: string
+    background: string
+    backgroundShade: number
     gradientAngle: number
     capsuleColor: string
     coreColor: string
     glassTint: string
-    // Light & shadow
+    // Form
+    capsuleCount: number
+    capsuleSize: number
+    bulge: number
+    dentSize: number
+    orbCount: number
+    marbleSize: number
+    orbDistance: number
+    distance: number
+    // Motion
+    speed: number
+    autoRotate: boolean
+    autoRotateSpeed: number
+    animateOnCanvas: boolean
+    // Interaction — drag to orbit is always on, so neither of these has a control.
+    interactive: boolean
+    allowZoom: boolean
+    // Light & material
     lightAngle: number
     lightHeight: number
-    shadowStrength: number
-    contactShadow: number
-    // Glass
-    refraction: number
-    glassThickness: number
+    shadow: OrbShadow
+    glass: OrbGlass
     // Effects
     bloomIntensity: number
     bloomThreshold: number
@@ -1577,32 +1645,30 @@ interface CapsuleOrbProps {
  */
 export default function CapsuleOrb(props: CapsuleOrbProps) {
     const {
+        background = DEFAULT_BACKGROUND,
+        backgroundShade = 0.7,
+        gradientAngle = 0,
+        capsuleColor = "#B2B8BB",
+        coreColor = "#111111",
+        glassTint = "#FFFFFF",
         capsuleCount = DEFAULT_INSTANCES_COUNT,
-        capsuleScale = 0.06,
+        capsuleSize = 100,
         bulge = 0.4,
         dentSize = 1,
         orbCount = 4,
-        orbSize = 0.3,
+        marbleSize = 100,
         orbDistance = 1.9,
         distance = 5,
-        speed = 1,
+        speed = BASE_SPEED,
         autoRotate = false,
         autoRotateSpeed = 0.3,
         animateOnCanvas = false,
         interactive = true,
         allowZoom = true,
-        backgroundLeft = "#AEB2B5",
-        backgroundRight = "#939A9D",
-        gradientAngle = 0,
-        capsuleColor = "#B2B8BB",
-        coreColor = "#111111",
-        glassTint = "#FFFFFF",
         lightAngle = 166,
         lightHeight = 0.78,
-        shadowStrength = 0.6,
-        contactShadow = 0.3,
-        refraction = 1.45,
-        glassThickness = 0.6,
+        shadow = DEFAULT_SHADOW,
+        glass = DEFAULT_GLASS,
         bloomIntensity = 2,
         bloomThreshold = 0.65,
         bloomSpread = 0.85,
@@ -1613,6 +1679,17 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         matcapImage,
         style,
     } = props
+
+    // The grouped controls arrive as objects, and the two sizes and the speed dial
+    // as percentages. Both are read defensively: a partial object, or a number the
+    // host handed over as a string, falls back to the scene's own value.
+    const shadowStrength = clamp(num(shadow?.strength, DEFAULT_SHADOW.strength), 0, 1)
+    const contactShadow = clamp(num(shadow?.contact, DEFAULT_SHADOW.contact), 0, 1)
+    const refraction = clamp(num(glass?.refraction, DEFAULT_GLASS.refraction), 1, 2.5)
+    const glassThickness = clamp(num(glass?.thickness, DEFAULT_GLASS.thickness), 0, 2)
+    const capsuleScale = BASE_CAPSULE_SCALE * (clamp(num(capsuleSize, 100), 10, 400) / 100)
+    const orbSize = BASE_ORB_SIZE * (clamp(num(marbleSize, 100), 10, 400) / 100)
+    const orbitSpeed = clamp(num(speed, BASE_SPEED), 0, 200) / BASE_SPEED
 
     const isStatic = useIsStaticRenderer()
     const animate = !isStatic || animateOnCanvas
@@ -1631,13 +1708,13 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         orbSize,
         orbDistance,
         distance,
-        speed,
+        speed: orbitSpeed,
         autoRotate,
         autoRotateSpeed,
         interactive,
         allowZoom,
-        backgroundLeft,
-        backgroundRight,
+        background,
+        backgroundShade,
         gradientAngle,
         capsuleColor,
         coreColor,
@@ -1702,13 +1779,13 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         orbSize,
         orbDistance,
         distance,
-        speed,
+        orbitSpeed,
         autoRotate,
         autoRotateSpeed,
         interactive,
         allowZoom,
-        backgroundLeft,
-        backgroundRight,
+        background,
+        backgroundShade,
         gradientAngle,
         capsuleColor,
         coreColor,
@@ -1736,7 +1813,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
                 width: "100%",
                 height: "100%",
                 overflow: "hidden",
-                background: backgroundLeft,
+                background,
                 touchAction: interactive ? "none" : "auto",
                 cursor: interactive ? "grab" : "default",
                 ...style,
@@ -1746,33 +1823,60 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
 }
 
 addPropertyControls(CapsuleOrb, {
+    // Ordered the way the rest of the kit orders a panel: the background and the
+    // palette first, then the handful of numbers most people reach for, then the
+    // two grouped rows for the material knobs that only matter once in a while.
+    //
     // Kept deliberately small. Every other knob the scene supports still exists
     // as a prop with a default — see the destructuring in CapsuleOrb — it just
-    // isn't worth a row in the panel.
+    // isn't worth a row in the panel. Drag to orbit is one of them: it is always
+    // on, so it has no switch.
     //
     // No Enum controls here on purpose: an Enum whose options are numbers loses
     // them outside Framer (option lists are read as strings), and the component
     // then receives "" where it expected a number. `Marbles` is a stepper for
     // that reason.
 
-    // ── Layout ───────────────────────────────────────────────────────────────
+    // ── Colors ───────────────────────────────────────────────────────────────
+    background: {
+        type: ControlType.Color,
+        title: "Background",
+        description: "The colour behind the orb. The gradient shades away from it on its own.",
+        defaultValue: DEFAULT_BACKGROUND,
+    },
+    capsuleColor: {
+        type: ControlType.Color,
+        title: "Base Color",
+        description: "The colour of the capsules before lighting.",
+        defaultValue: "#B2B8BB",
+    },
+    glassTint: {
+        type: ControlType.Color,
+        title: "Marble Color",
+        description: "Tints the glass marbles orbiting the orb. White leaves them clear.",
+        defaultValue: "#FFFFFF",
+        hidden: (props: CapsuleOrbProps) => props.orbCount === 0,
+    },
+
+    // ── Form ─────────────────────────────────────────────────────────────────
     capsuleCount: {
         type: ControlType.Number,
-        title: "Capsules",
+        title: "Density",
         description: "How many capsules make up the sphere. Higher is denser and costs more to draw.",
         defaultValue: DEFAULT_INSTANCES_COUNT,
         min: 250,
         max: 8000,
         step: 50,
     },
-    capsuleScale: {
+    capsuleSize: {
         type: ControlType.Number,
         title: "Capsule Size",
-        description: "The thickness of each individual capsule.",
-        defaultValue: 0.06,
-        min: 0.01,
-        max: 0.16,
-        step: 0.005,
+        description: "The thickness of each capsule, as a percentage of the default.",
+        defaultValue: 100,
+        min: 25,
+        max: 250,
+        step: 5,
+        unit: "%",
     },
     orbCount: {
         type: ControlType.Number,
@@ -1784,14 +1888,15 @@ addPropertyControls(CapsuleOrb, {
         step: 1,
         displayStepper: true,
     },
-    orbSize: {
+    marbleSize: {
         type: ControlType.Number,
         title: "Marble Size",
-        description: "The radius of each marble. The dents it carves scale with it.",
-        defaultValue: 0.3,
-        min: 0.1,
-        max: 0.8,
-        step: 0.01,
+        description: "The size of each marble, as a percentage. The dents it carves scale with it.",
+        defaultValue: 100,
+        min: 35,
+        max: 260,
+        step: 5,
+        unit: "%",
         hidden: (props: CapsuleOrbProps) => props.orbCount === 0,
     },
     distance: {
@@ -1801,18 +1906,18 @@ addPropertyControls(CapsuleOrb, {
         defaultValue: 5,
         min: 2.5,
         max: 14,
-        step: 0.1,
+        step: 0.5,
     },
 
-    // ── Animation ────────────────────────────────────────────────────────────
+    // ── Motion ───────────────────────────────────────────────────────────────
     speed: {
         type: ControlType.Number,
         title: "Speed",
-        description: "How fast the marbles travel around their orbits.",
-        defaultValue: 1,
+        description: "How fast the marbles travel around their orbits. 50 is the natural pace.",
+        defaultValue: BASE_SPEED,
         min: 0,
-        max: 3,
-        step: 0.05,
+        max: 100,
+        step: 1,
     },
     autoRotate: {
         type: ControlType.Boolean,
@@ -1822,46 +1927,8 @@ addPropertyControls(CapsuleOrb, {
         enabledTitle: "Yes",
         disabledTitle: "No",
     },
-    animateOnCanvas: {
-        type: ControlType.Boolean,
-        title: "On Canvas",
-        description: "Keep animating on the Framer canvas instead of rendering one static frame.",
-        defaultValue: false,
-        enabledTitle: "Animate",
-        disabledTitle: "Static",
-    },
 
-    // ── Interaction ──────────────────────────────────────────────────────────
-    interactive: {
-        type: ControlType.Boolean,
-        title: "Orbit",
-        description: "Lets visitors drag to orbit the camera and zoom.",
-        defaultValue: true,
-        enabledTitle: "Drag",
-        disabledTitle: "Off",
-    },
-
-    // ── Colors ───────────────────────────────────────────────────────────────
-    backgroundLeft: {
-        type: ControlType.Color,
-        title: "Background A",
-        description: "The first stop of the background gradient.",
-        defaultValue: "#AEB2B5",
-    },
-    backgroundRight: {
-        type: ControlType.Color,
-        title: "Background B",
-        description: "The second stop of the background gradient.",
-        defaultValue: "#939A9D",
-    },
-    capsuleColor: {
-        type: ControlType.Color,
-        title: "Capsule Color",
-        description: "The base color of the capsules before lighting.",
-        defaultValue: "#B2B8BB",
-    },
-
-    // ── Light ────────────────────────────────────────────────────────────────
+    // ── Light & material ─────────────────────────────────────────────────────
     lightAngle: {
         type: ControlType.Number,
         title: "Light Angle",
@@ -1872,24 +1939,55 @@ addPropertyControls(CapsuleOrb, {
         step: 1,
         unit: "\u00b0",
     },
-    lightHeight: {
-        type: ControlType.Number,
-        title: "Light Height",
-        description: "Raises or lowers the key light above the orb.",
-        defaultValue: 0.78,
-        min: -1.5,
-        max: 1.5,
-        step: 0.02,
+    shadow: {
+        type: ControlType.Object,
+        title: "Shadow",
+        description: "How dark the capsules shadow each other, and the contact shade under the orb.",
+        controls: {
+            strength: {
+                type: ControlType.Number,
+                title: "Strength",
+                description: "How dark a shadowed capsule goes.",
+                defaultValue: DEFAULT_SHADOW.strength,
+                min: 0,
+                max: 1,
+                step: 0.05,
+            },
+            contact: {
+                type: ControlType.Number,
+                title: "Contact",
+                description: "The soft shade the orb casts on the ground beneath it.",
+                defaultValue: DEFAULT_SHADOW.contact,
+                min: 0,
+                max: 1,
+                step: 0.05,
+            },
+        },
     },
-
-    // ── Effects ──────────────────────────────────────────────────────────────
-    bloomIntensity: {
-        type: ControlType.Number,
-        title: "Bloom",
-        description: "How strongly the bright edges glow.",
-        defaultValue: 2,
-        min: 0,
-        max: 5,
-        step: 0.1,
+    glass: {
+        type: ControlType.Object,
+        title: "Glass",
+        description: "How strongly the marbles bend the scene behind them.",
+        controls: {
+            refraction: {
+                type: ControlType.Number,
+                title: "Refraction",
+                description: "The index of refraction. 1 is water-thin, higher warps more.",
+                defaultValue: DEFAULT_GLASS.refraction,
+                min: 1,
+                max: 2.5,
+                step: 0.01,
+            },
+            thickness: {
+                type: ControlType.Number,
+                title: "Thickness",
+                description: "How far a refracted ray travels through the marble.",
+                defaultValue: DEFAULT_GLASS.thickness,
+                min: 0,
+                max: 2,
+                step: 0.05,
+            },
+        },
+        hidden: (props: CapsuleOrbProps) => props.orbCount === 0,
     },
 })

@@ -29,6 +29,12 @@ const DEFAULT_COOL_B = "#0A6B60"
 const DEFAULT_WARM_A = "#C2264F"
 const DEFAULT_WARM_B = "#E08A2A"
 
+/** Speed is a 0-100 dial; this is where it sits at 1x, so it can be halved or doubled. */
+const BASE_SPEED = 50
+
+/** Default for the grouped Cycle control, also used when one of its fields arrives missing. */
+const DEFAULT_CYCLE = { period: 16, fade: 2.4 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shaders
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,7 +301,13 @@ function clamp(value: number, min: number, max: number): number {
  * and a black screen, which is a very confusing way to find out.
  */
 function num(value: unknown, fallback: number): number {
-    const n = typeof value === "number" ? value : Number(value)
+    if (typeof value === "number") return Number.isFinite(value) ? value : fallback
+    // `Number("")` and `Number(null)` are both 0 — finite, and so silently
+    // accepted by the check below. Those are exactly the values a host hands over
+    // when it has nothing, so they have to be rejected before the coercion.
+    if (value == null) return fallback
+    if (typeof value === "string" && value.trim() === "") return fallback
+    const n = Number(value)
     return Number.isFinite(n) ? n : fallback
 }
 
@@ -638,6 +650,12 @@ function createExperience(container: HTMLElement, initial: SceneParams, animate:
 // Framer component
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** The grouped Cycle control. One row, summarising its fields. */
+interface VeilCycle {
+    period: number
+    fade: number
+}
+
 interface LightVeilProps {
     // Composition
     coolCount: number
@@ -655,8 +673,7 @@ interface LightVeilProps {
     animateOnCanvas: boolean
     // Colour
     colorMode: "cycle" | "color" | "mono"
-    cyclePeriod: number
-    cycleFade: number
+    cycle: VeilCycle
     monoLift: number
     background: string
     coolA: string
@@ -687,13 +704,12 @@ export default function LightVeil(props: LightVeilProps) {
         falloff = 0.8,
         intensity = 1,
         seed = 37,
-        speed = 1,
+        speed = BASE_SPEED,
         breath = 1,
         drift = 1,
         animateOnCanvas = false,
         colorMode = "cycle",
-        cyclePeriod = 16,
-        cycleFade = 2.4,
+        cycle = DEFAULT_CYCLE,
         monoLift = 1.45,
         background = DEFAULT_BACKGROUND,
         coolA = DEFAULT_COOL_A,
@@ -705,6 +721,13 @@ export default function LightVeil(props: LightVeilProps) {
         maxPixelRatio = 1,
         style,
     } = props
+
+    // The grouped control arrives as an object and the speed dial as 0-100. Both
+    // are read defensively: a partial object, or a number the host handed over as
+    // a string, falls back to the shader's own value.
+    const cyclePeriod = clamp(num(cycle?.period, DEFAULT_CYCLE.period), 2, 60)
+    const cycleFade = clamp(num(cycle?.fade, DEFAULT_CYCLE.fade), 0.2, 12)
+    const veilSpeed = clamp(num(speed, BASE_SPEED), 0, 200) / BASE_SPEED
 
     const isStatic = useIsStaticRenderer()
     const animate = !isStatic || animateOnCanvas
@@ -721,7 +744,7 @@ export default function LightVeil(props: LightVeilProps) {
         falloff,
         intensity,
         seed,
-        speed,
+        speed: veilSpeed,
         breath,
         drift,
         colorMode,
@@ -784,7 +807,7 @@ export default function LightVeil(props: LightVeilProps) {
         falloff,
         intensity,
         seed,
-        speed,
+        veilSpeed,
         breath,
         drift,
         colorMode,
@@ -818,6 +841,10 @@ export default function LightVeil(props: LightVeilProps) {
 }
 
 addPropertyControls(LightVeil, {
+    // Ordered the way the rest of the kit orders a panel: the background and the
+    // palette first, then the numbers most people reach for, then one grouped row
+    // for the cycle timings, which only matter in one of the three modes.
+    //
     // Kept deliberately small. Every other knob the shader supports still exists
     // as a prop with a default — see the destructuring in LightVeil — it just
     // isn't worth a row in the panel.
@@ -827,11 +854,47 @@ addPropertyControls(LightVeil, {
     // read as strings), and the component then receives "" where it expected a
     // number. That is how `Quality` once produced a 1x1 canvas.
 
+    // ── Colour ─────────────────────────────────────────────────────
+    background: {
+        type: ControlType.Color,
+        title: "Background",
+        description: "The dark ground the lights sit on.",
+        defaultValue: DEFAULT_BACKGROUND,
+    },
+    coolA: {
+        type: ControlType.Color,
+        title: "Base Color",
+        description: "The colour most of the columns are drawn from.",
+        defaultValue: DEFAULT_COOL_A,
+    },
+    coolB: {
+        type: ControlType.Color,
+        title: "Accent Color",
+        description: "The colour the dimmer columns fall back to. Columns mix between the two.",
+        defaultValue: DEFAULT_COOL_B,
+    },
+    warmA: {
+        type: ControlType.Color,
+        title: "Warm Color",
+        description: "The colour of the warm glows underneath.",
+        defaultValue: DEFAULT_WARM_A,
+        hidden: (props: LightVeilProps) => props.warmCount === 0,
+    },
+    colorMode: {
+        type: ControlType.Enum,
+        title: "Mode",
+        description: "Cycle drains to grayscale and back; Colour and Mono hold one look.",
+        defaultValue: "cycle",
+        options: ["cycle", "color", "mono"],
+        optionTitles: ["Cycle", "Colour", "Mono"],
+        displaySegmentedControl: true,
+    },
+
     // ── Composition ────────────────────────────────────────────────
     coolCount: {
         type: ControlType.Number,
-        title: "Columns",
-        description: "How many cool light shafts hang from the top edge.",
+        title: "Density",
+        description: "How many light shafts hang from the top edge.",
         defaultValue: 15,
         min: 1,
         max: MAX_COOL_COLUMNS,
@@ -877,15 +940,15 @@ addPropertyControls(LightVeil, {
         displayStepper: true,
     },
 
-    // ── Animation ──────────────────────────────────────────────────
+    // ── Motion ─────────────────────────────────────────────────────
     speed: {
         type: ControlType.Number,
         title: "Speed",
-        description: "How fast the whole field breathes and drifts.",
-        defaultValue: 1,
+        description: "How fast the whole field breathes and drifts. 50 is the natural pace.",
+        defaultValue: BASE_SPEED,
         min: 0,
-        max: 3,
-        step: 0.05,
+        max: 100,
+        step: 1,
     },
     animateOnCanvas: {
         type: ControlType.Boolean,
@@ -894,42 +957,6 @@ addPropertyControls(LightVeil, {
         defaultValue: false,
         enabledTitle: "Animate",
         disabledTitle: "Static",
-    },
-
-    // ── Colour ─────────────────────────────────────────────────────
-    colorMode: {
-        type: ControlType.Enum,
-        title: "Mode",
-        description: "Cycle drains to grayscale and back; Colour and Mono hold one look.",
-        defaultValue: "cycle",
-        options: ["cycle", "color", "mono"],
-        optionTitles: ["Cycle", "Colour", "Mono"],
-        displaySegmentedControl: true,
-    },
-    background: {
-        type: ControlType.Color,
-        title: "Background",
-        description: "The dark ground the lights sit on.",
-        defaultValue: DEFAULT_BACKGROUND,
-    },
-    coolA: {
-        type: ControlType.Color,
-        title: "Light A",
-        description: "The first cool colour the columns are drawn from.",
-        defaultValue: DEFAULT_COOL_A,
-    },
-    coolB: {
-        type: ControlType.Color,
-        title: "Light B",
-        description: "The second cool colour. Columns mix between A and B.",
-        defaultValue: DEFAULT_COOL_B,
-    },
-    warmA: {
-        type: ControlType.Color,
-        title: "Warm",
-        description: "The colour of the warm glows underneath.",
-        defaultValue: DEFAULT_WARM_A,
-        hidden: (props: LightVeilProps) => props.warmCount === 0,
     },
 
     // ── Finish ─────────────────────────────────────────────────────
@@ -941,5 +968,33 @@ addPropertyControls(LightVeil, {
         min: 0,
         max: 1,
         step: 0.05,
+    },
+    cycle: {
+        type: ControlType.Object,
+        title: "Cycle",
+        description: "How long one colour-to-grayscale round takes, and how long the drain lasts.",
+        controls: {
+            period: {
+                type: ControlType.Number,
+                title: "Period",
+                description: "Seconds for one full round trip through grayscale and back.",
+                defaultValue: DEFAULT_CYCLE.period,
+                min: 4,
+                max: 60,
+                step: 1,
+                unit: "s",
+            },
+            fade: {
+                type: ControlType.Number,
+                title: "Fade",
+                description: "Seconds the colour takes to drain, and to flood back.",
+                defaultValue: DEFAULT_CYCLE.fade,
+                min: 0.2,
+                max: 12,
+                step: 0.1,
+                unit: "s",
+            },
+        },
+        hidden: (props: LightVeilProps) => props.colorMode !== "cycle",
     },
 })
