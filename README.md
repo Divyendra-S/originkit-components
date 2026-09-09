@@ -159,7 +159,7 @@ Three constants in the source set the scale rather than the look. `DRUM_RADIUS`
 (`0.46` screen widths from the axis) is where the fine lines are drawn and about
 where the outer clusters ride, so at the default Depth a cluster turns round
 just inside the edge of the frame. `DRUM_LINES_COARSE` and `DRUM_LINES_FINE`
-(`40` and `260`) are how many lines of each scale the drum carries the whole way
+(`40` and `120`) are how many lines of each scale the drum carries the whole way
 round; they are integers because the noise wraps on them, which is what makes
 a turn seamless. At the default Travel a full revolution takes about sixteen
 seconds.

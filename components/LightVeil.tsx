@@ -59,7 +59,7 @@ const TURNS_PER_SECOND = 0.22
  */
 const DRUM_RADIUS = 0.46
 const DRUM_LINES_COARSE = 40
-const DRUM_LINES_FINE = 260
+const DRUM_LINES_FINE = 120
 
 /**
  * The layer counts at Density 16. A carousel keeps all of its light on screen at
@@ -67,7 +67,7 @@ const DRUM_LINES_FINE = 260
  * past, these are what the frame actually holds at any moment.
  */
 const BASE_DENSITY = 16
-const HAZE_AT_BASE = 6
+const HAZE_AT_BASE = 8
 const BANDS_AT_BASE = 34
 const STREAKS_AT_BASE = 28
 
@@ -361,7 +361,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
             // Wide enough that neighbours run together into one continuous mass,
             // and wider again on the near side of the turn.
-            float w = (0.038 + 0.082 * r3) * u_softness * zoom;
+            float w = (0.060 + 0.115 * r3) * u_softness * zoom;
             w *= 1.0 + 0.30 * u_breath * sin(t * (0.07 + r1 * 0.09) + r2 * 6.2832);
 
             // Past ~3 sigma of the widest tier a light contributes less than one
@@ -376,17 +376,17 @@ const FRAGMENT_SHADER = /* glsl */ `
             // They sit high — upper and middle of the frame, not the floor. The
             // rings are seen slightly from above, so a mass on the near side
             // also rides a little lower than the same one round the back.
-            float cy = 0.22 + r2 * 0.26 + 0.05 * front;
+            float cy = 0.14 + r2 * 0.20 + 0.04 * front;
             // Only half the zoom goes into the height: at full strength a near
             // mass grows tall enough to blanket the frame, and the dark floor is
             // the first thing to go.
-            float ry = (0.24 + r3 * 0.28) * mix(1.0, zoom, 0.5);
+            float ry = (0.16 + r3 * 0.20) * mix(1.0, zoom, 0.5);
             ry *= 1.0 + 0.22 * u_breath * sin(t * (0.06 + r3 * 0.08) + r1 * 6.2832);
 
             // Near light is bright light. Together with the width and height the
             // zoom already gave it, this is what makes a clump read as coming
             // forward and going back rather than travelling across.
-            float amp = (0.055 + 0.19 * r3) * clusterGain(k, t) * mix(0.34, 1.36, 0.5 + 0.5 * front);
+            float amp = (0.050 + 0.16 * r3) * clusterGain(k, t) * mix(0.34, 1.36, 0.5 + 0.5 * front);
 
             float d = dx / max(w, 0.004);
             float dv = (v - cy) / max(ry, 0.02);
@@ -418,7 +418,7 @@ const FRAGMENT_SHADER = /* glsl */ `
             cx += sin(t * (0.09 + r3 * 0.11) + r4 * 6.2832) * 0.020 * u_drift;
 
             float girth = pow(r3, 1.5);
-            float w = (0.016 + 0.055 * girth) * u_softness * zoom;
+            float w = (0.022 + 0.070 * girth) * u_softness * zoom;
             w *= 1.0 + 0.40 * u_breath * sin(t * (0.10 + r4 * 0.15) + r5 * 6.2832);
 
             float dx = px - cx;
@@ -426,12 +426,12 @@ const FRAGMENT_SHADER = /* glsl */ `
 
             // Most hang from the top edge, but a fair few begin around the
             // middle, so the lengths never line up into a row.
-            float top = mix(0.01, 0.52, pow(r2, 1.6)) + 0.04 * front;
+            float top = mix(0.0, 0.34, pow(r2, 1.6)) + 0.03 * front;
 
             // How far down the frame this band survives before dissolving. It
             // grows with the zoom, so a band coming forward lengthens as well as
             // widening — the two together are what sell the approach.
-            float reach = top + (0.30 + r4 * 0.62) * zoom;
+            float reach = top + (0.20 + r4 * 0.40) * zoom;
             reach *= 1.0 + 0.20 * u_breath * sin(t * (0.08 + r1 * 0.12) + r2 * 6.2832);
 
             float amp = (0.07 + 0.95 * pow(r5, 2.2)) * mix(0.60, 1.20, girth) * clusterGain(k, t);
@@ -476,7 +476,7 @@ const FRAGMENT_SHADER = /* glsl */ `
                 a, front, zoom);
             cx += sin(t * (0.10 + r3 * 0.13) + r5 * 6.2832) * 0.016 * u_drift;
 
-            float w = (0.0062 + 0.011 * r3) * u_softness * zoom;
+            float w = (0.0095 + 0.015 * r3) * u_softness * zoom;
             w *= 1.0 + 0.35 * u_breath * sin(t * (0.12 + r4 * 0.16) + r2 * 6.2832);
 
             float dx = px - cx;
@@ -485,9 +485,9 @@ const FRAGMENT_SHADER = /* glsl */ `
 
 
             // Some are tall, some are a short concentrated highlight halfway down.
-            float top = mix(0.01, 0.56, pow(r2, 1.4)) + 0.04 * front;
+            float top = mix(0.0, 0.40, pow(r2, 1.4)) + 0.03 * front;
             // Some stretch downwards over time and pull back up again.
-            float reach = top + (0.16 + r4 * 0.72) * zoom;
+            float reach = top + (0.14 + r4 * 0.46) * zoom;
             reach *= 1.0 + 0.26 * u_breath * sin(t * (0.09 + r1 * 0.13) + r3 * 6.2832);
 
             // Where the bright core sits, and how far it shifts inside its halo.
@@ -510,7 +510,7 @@ const FRAGMENT_SHADER = /* glsl */ `
             // Diffused body under a much wider halo, and no edge on either.
             vec3 c = hue * (gauss(d) * 0.22 + gauss(d * 0.30) * 0.11) * vprof * amp;
             // Cores bloom towards white-green without ever reading as a beam.
-            c += mix(hue, vec3(1.0), 0.34) * (gauss(d * 1.4) * 0.55 + gauss(d * 3.0) * 0.26) * gauss(hv) * vprof * amp * 2.5;
+            c += mix(hue, vec3(1.0), 0.34) * (gauss(d * 1.0) * 0.50 + gauss(d * 2.0) * 0.28) * gauss(hv) * vprof * amp * 1.5;
             float nw = nearWeight(front);
             glowNear += c * nw;
             glowFar += c * (1.0 - nw);
@@ -544,7 +544,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
             // These live across the middle and lower middle of their own clump,
             // never the full height.
-            float cy = 0.44 + r3 * 0.24 + 0.05 * front;
+            float cy = 0.38 + r3 * 0.22 + 0.04 * front;
             cy += 0.05 * u_breath * sin(t * (0.11 + r4 * 0.12) + r2 * 6.2832);
             float ry = (0.10 + r4 * 0.20) * zoom;
 
@@ -589,18 +589,19 @@ const FRAGMENT_SHADER = /* glsl */ `
         float turnFar = (PI - asn - lean - a) / TAU;
 
         // Stretched hard in y so it smears rather than speckles, with a slow
-        // downward crawl. A broad scale shapes the clouds; a fine one, sharpened
-        // so its peaks narrow into lines and its troughs open into gaps between
-        // them, is the thin vertical grain.
+        // downward crawl. A broad scale shapes the clouds and is given most of
+        // the depth, so the field gathers into clumps with darker gaps between
+        // them; a fine one, kept shallow — in the reference the grain is a
+        // faint texture on the masses, never etched lines — is the vertical grain.
         float vy = v * 1.2 - t * 0.025;
         float coarseNear = fbmWrap(vec2(turnNear * ${DRUM_LINES_COARSE}.0, vy), ${DRUM_LINES_COARSE}.0);
         float coarseFar = fbmWrap(vec2(turnFar * ${DRUM_LINES_COARSE}.0 + 11.0, vy + 5.0), ${DRUM_LINES_COARSE}.0);
         float fineNear = fbmWrap(vec2(turnNear * ${DRUM_LINES_FINE}.0, v * 2.6 - t * 0.018 + 3.0), ${DRUM_LINES_FINE}.0);
         float fineFar = fbmWrap(vec2(turnFar * ${DRUM_LINES_FINE}.0 + 37.0, v * 2.6 - t * 0.018 + 9.0), ${DRUM_LINES_FINE}.0);
-        float linesNear = 0.32 + 1.25 * pow(fineNear, 2.0);
-        float linesFar = 0.28 + 1.35 * pow(fineFar, 2.0);
-        float striateNear = (0.25 + 1.35 * coarseNear) * linesNear;
-        float striateFar = (0.25 + 1.35 * coarseFar) * linesFar;
+        float linesNear = 0.78 + 0.40 * fineNear;
+        float linesFar = 0.72 + 0.50 * fineFar;
+        float striateNear = (0.26 + 1.30 * coarseNear) * linesNear;
+        float striateFar = (0.24 + 1.32 * coarseFar) * linesFar;
 
         // Each face's light is seen through its own face of the drum.
         vec3 glow = glowNear * mix(1.0, striateNear, u_haze) + glowFar * mix(1.0, striateFar, u_haze);
@@ -608,11 +609,11 @@ const FRAGMENT_SHADER = /* glsl */ `
         // The far face on its own, faintly, packed around the axis: the dense
         // background of thin lines behind the core, there even between the far
         // lights, and always running against the near ones.
-        float axisMask = exp(-xp * xp * 9.0) * (1.0 - smoothstep(0.15, 0.95, v)) * smoothstep(-0.05, 0.12, v);
-        glow += mix(u_coolB, u_coolA, 0.25) * striateFar * axisMask * u_haze * 0.05;
+        float axisMask = exp(-xp * xp * 9.0) * (1.0 - smoothstep(0.10, 0.70, v)) * smoothstep(-0.05, 0.12, v);
+        glow += mix(u_coolB, u_coolA, 0.25) * striateFar * axisMask * u_haze * 0.04;
 
         // The lower part of the frame stays dark; nothing lands on a surface.
-        float depth = mix(1.0, 1.0 - smoothstep(0.48, 1.02, v), u_falloff);
+        float depth = mix(1.0, 1.0 - smoothstep(0.34, 0.86, v), u_falloff);
         glow *= depth;
 
         // A breath of fog so the gaps read as atmosphere, not void.
@@ -629,7 +630,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
         // The field breathes overall, on two slow periods that never line up —
         // a wander in the light level, not a pulse.
-        glow *= 1.90 + 0.36 * (0.5 + 0.5 * sin(t * 0.081 + 1.3)) + 0.22 * (0.5 + 0.5 * sin(t * 0.037));
+        glow *= 1.30 + 0.28 * (0.5 + 0.5 * sin(t * 0.081 + 1.3)) + 0.16 * (0.5 + 0.5 * sin(t * 0.037));
 
         // Drain the hue, keep the light. Positions, shapes, travel and every
         // internal movement carry straight on through — only saturation goes.
@@ -1302,7 +1303,9 @@ addPropertyControls(LightVeil, {
     //
     // Kept deliberately small. Every other knob the shader supports still exists
     // as a prop with a default — see the destructuring in LightVeil — it just
-    // isn't worth a row in the panel.
+    // isn't worth a row in the panel. `seed` is one of them: the structure is
+    // meant to be the one structure, so it is fixed at its default rather than
+    // offered as a reshuffle.
     //
     // `colorMode` is the only Enum, and its options are strings on purpose: an
     // Enum whose options are numbers loses them outside Framer (option lists are
@@ -1383,16 +1386,6 @@ addPropertyControls(LightVeil, {
         min: 0,
         max: 2.5,
         step: 0.05,
-    },
-    seed: {
-        type: ControlType.Number,
-        title: "Seed",
-        description: "Reshuffles the clusters, their positions and their widths. Any value is a different field.",
-        defaultValue: 37,
-        min: 0,
-        max: 100,
-        step: 1,
-        displayStepper: true,
     },
 
     // ── Motion ─────────────────────────────────────────────────────
