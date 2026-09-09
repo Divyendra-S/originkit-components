@@ -108,7 +108,8 @@ Framer code component — no imports beyond React and Framer.
 ### API Reference
 
 All props map directly to the controls panel sliders and color pickers, ordered
-colors first, then form, then motion, then the finish. Panel titles are plain
+colors first — with the two speed dials at the end of that group, since they
+are the ones people reach for first — then form, then motion, then the finish. Panel titles are plain
 words, as on Capsule Orb; where a title differs from the prop name the table
 says so.
 
@@ -122,6 +123,7 @@ says so.
 | `warmA` | color | `#C2264F` | The colour of the warm glows low in the frame. Shown as **Warm Color**. |
 | `colorMode` | enum | `cycle` | Cycle fades between white and colour; Colour and Mono hold one look. Shown as **Color Mode**. |
 | `colorSpeed` | number | `50` | How fast the scene fades from white to colour and back. 50 is the natural pace, 0 stays in colour. Only in Cycle mode. Shown as **Color Speed**. |
+| `speed` | number | `50` | How fast the lights move and turn. 50 is the natural pace. |
 
 #### FORM
 
@@ -136,7 +138,6 @@ says so.
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `speed` | number | `50` | How fast the lights move and turn. 50 is the natural pace. |
 | `curve` | number | `0.9` | How much the lights swell as they come to the front. Low is flat, high is deep. Shown as **Depth**. |
 
 #### FINISH

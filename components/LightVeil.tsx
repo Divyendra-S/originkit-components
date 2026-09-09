@@ -621,8 +621,12 @@ const FRAGMENT_SHADER = /* glsl */ `
         // that comes down over the right-hand side — so the turning lights pass
         // through it the way they would pass behind a fixed edge of glass. The
         // floor breathes a little, so the bottom fills and empties over time.
-        float floorAt = 0.34 + 0.42 * x + 0.06 * sin(t * 0.045);
-        float floorMask = 1.0 - smoothstep(floorAt, floorAt + 0.32, v);
+        // In grayscale the reference is covered further down — the shafts run
+        // on towards the bottom edge and fog fills what they miss — so the floor
+        // drops and its fade lengthens as the colour drains, and comes back up
+        // as it floods in.
+        float floorAt = 0.34 + 0.42 * x + 0.06 * sin(t * 0.045) + 0.20 * u_mono;
+        float floorMask = 1.0 - smoothstep(floorAt, floorAt + 0.32 + 0.30 * u_mono, v);
         float ceilingAt = max(0.0, (x - 0.50) * 0.75);
         float ceilingMask = smoothstep(ceilingAt - 0.10, ceilingAt + 0.22, v);
         float depth = mix(1.0, floorMask * ceilingMask, u_falloff);
@@ -630,7 +634,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
         // A breath of fog so the gaps read as atmosphere, not void.
         float fog = fbm(vec2(px * 3.4 - a * 0.22 - t * 0.012, v * 1.05 + u_seed + 9.0));
-        glow += u_coolB * fog * u_haze * 0.012 * depth;
+        glow += u_coolB * fog * u_haze * (0.012 + 0.018 * u_mono) * depth;
 
         // Most of the frame has to stay near black with colour surfacing only
         // locally, and that is contrast, not exposure — winding the gain up on
@@ -1381,6 +1385,17 @@ addPropertyControls(LightVeil, {
         step: 1,
         hidden: (props: LightVeilProps) => props.colorMode !== "cycle",
     },
+    // Speed sits up here with Color Speed rather than down in Motion: the two
+    // dials are the ones people reach for first, and they read as a pair.
+    speed: {
+        type: ControlType.Number,
+        title: "Speed",
+        description: "How fast the lights move and turn. 50 is the natural pace.",
+        defaultValue: BASE_SPEED,
+        min: 0,
+        max: 100,
+        step: 1,
+    },
 
     // ── Form ───────────────────────────────────────────────────────
     coolCount: {
@@ -1423,15 +1438,6 @@ addPropertyControls(LightVeil, {
     },
 
     // ── Motion ─────────────────────────────────────────────────────
-    speed: {
-        type: ControlType.Number,
-        title: "Speed",
-        description: "How fast the lights move and turn. 50 is the natural pace.",
-        defaultValue: BASE_SPEED,
-        min: 0,
-        max: 100,
-        step: 1,
-    },
     curve: {
         type: ControlType.Number,
         title: "Depth",
