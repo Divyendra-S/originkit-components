@@ -3,9 +3,9 @@ import type { CSSProperties } from "react"
 import { addPropertyControls, ControlType, useIsStaticRenderer } from "framer"
 // Pinned, and a full URL rather than a bare name. Framer and the Originkit
 // builder both resolve bare specifiers through a CDN at whatever version is
-// current, and this component is written against r170: on r186 the shadow
-// sampler types no longer match, every instanced draw fails with
-// GL_INVALID_OPERATION, and the capsule shell renders as nothing at all.
+// current, and this component is written against r170: on r186 the instanced
+// draws fail with GL_INVALID_OPERATION and the capsule shell renders as
+// nothing at all.
 import * as THREE from "https://esm.sh/three@0.170.0"
 
 /**
@@ -14,9 +14,13 @@ import * as THREE from "https://esm.sh/three@0.170.0"
  * A sphere made of 3,000 instanced capsules, pushed around by four orbiting glass
  * marbles. Ported from https://github.com/emmelleppi/threejs-challenge-0 into a
  * single Framer code component. Only `three` is imported: the post-processing
- * (mipmap bloom, vignette, sRGB output), the Kawase refraction blur, shadows and
+ * (mipmap bloom, vignette, sRGB output), the Kawase refraction blur and the
  * orbit controls are all implemented inline so nothing depends on React Three
  * Fiber or the `postprocessing` package.
+ *
+ * There is no light in the scene and nothing casts a shadow. The capsules are
+ * the colour you pick, modelled by one direction that is fixed to the camera —
+ * see VIEW_SHADING_GLSL.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,8 +29,6 @@ import * as THREE from "https://esm.sh/three@0.170.0"
 
 const DEFAULT_INSTANCES_COUNT = 3000
 const BLOOM_LEVELS = 8
-const DEFAULT_NOISE_URL =
-    "https://raw.githubusercontent.com/emmelleppi/threejs-challenge-0/main/public/bnoise.png"
 const DEFAULT_MATCAP_URL =
     "https://raw.githubusercontent.com/emmelleppi/threejs-challenge-0/main/public/glass.png"
 
@@ -47,83 +49,26 @@ const BASE_CAPSULE_SCALE = 0.06
 /** Speed is a 0-100 dial; this is where it sits at 1x, so it can be halved or doubled. */
 const BASE_SPEED = 50
 
-const DEFAULT_BACKGROUND = "#AEB2B5"
+const DEFAULT_BACKGROUND = "#000000"
+const DEFAULT_CAPSULE_COLOR = "#D9DDE0"
 
-/** Defaults for the two grouped controls, also used when one of their fields arrives missing. */
-const DEFAULT_SHADOW = { strength: 0.6, contact: 0.3 }
+/** Defaults for the grouped control, also used when one of its fields arrives missing. */
 const DEFAULT_GLASS = { refraction: 1.45, thickness: 0.6 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scene shaders (verbatim from the original, with the shared PCF shadow code
-// factored into one chunk)
+// Scene shaders
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SHADOW_STRUCT_GLSL = /* glsl */ `
-    struct DirectionalLightShadow {
-        float shadowBias;
-        float shadowNormalBias;
-        float shadowRadius;
-        vec2 shadowMapSize;
-    };
-`
-
-const SHADOW_SAMPLING_GLSL = /* glsl */ `
-    uniform sampler2D directionalShadowMap[ 1 ];
-    varying vec4 vDirectionalShadowCoord[ 1 ];
-    ${SHADOW_STRUCT_GLSL}
-    uniform DirectionalLightShadow directionalLightShadows[ 1 ];
-
-    #include <packing>
-
-    float texture2DCompare( sampler2D depths, vec2 uv, float compare ) {
-        return step( compare, unpackRGBAToDepth( texture2D( depths, uv ) ) );
-    }
-
-    float getShadow( sampler2D shadowMap, vec2 shadowMapSize, float shadowBias, float shadowRadius, vec4 shadowCoord ) {
-        float shadow = 1.0;
-
-        shadowCoord.xyz /= shadowCoord.w;
-        shadowCoord.z += shadowBias;
-
-        bvec4 inFrustumVec = bvec4 ( shadowCoord.x >= 0.0, shadowCoord.x <= 1.0, shadowCoord.y >= 0.0, shadowCoord.y <= 1.0 );
-        bool inFrustum = all( inFrustumVec );
-        bvec2 frustumTestVec = bvec2( inFrustum, shadowCoord.z <= 1.0 );
-        bool frustumTest = all( frustumTestVec );
-
-        if ( frustumTest ) {
-            vec2 texelSize = vec2( 1.0 ) / shadowMapSize;
-
-            float dx0 = - texelSize.x * shadowRadius;
-            float dy0 = - texelSize.y * shadowRadius;
-            float dx1 = + texelSize.x * shadowRadius;
-            float dy1 = + texelSize.y * shadowRadius;
-            float dx2 = dx0 / 2.0;
-            float dy2 = dy0 / 2.0;
-            float dx3 = dx1 / 2.0;
-            float dy3 = dy1 / 2.0;
-
-            shadow = (
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, dy0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, dy0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, dy2 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy2 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, dy2 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, 0.0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, 0.0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy, shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, 0.0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, 0.0 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx2, dy3 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy3 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx3, dy3 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx0, dy1 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( 0.0, dy1 ), shadowCoord.z ) +
-                texture2DCompare( shadowMap, shadowCoord.xy + vec2( dx1, dy1 ), shadowCoord.z )
-            ) * ( 1.0 / 17.0 );
-        }
-
-        return shadow;
+const VIEW_SHADING_GLSL = /* glsl */ `
+    // Nothing in this scene emits light, so nothing is aimed and nothing casts a
+    // shadow. The capsules and the marbles are modelled by one direction held in
+    // *view* space and turned back into world space here, which means it travels
+    // with the camera: drag the orb or let it auto-rotate and the bright side
+    // stays where the viewer sees it, the way a colour swatch does. A direction
+    // fixed in world space would instead sweep across the orb as the viewpoint
+    // moved, which reads as the lamp turning rather than the object.
+    vec3 shadingDirection() {
+        return normalize((vec4(0.32, 0.60, 0.73, 0.0) * viewMatrix).xyz);
     }
 `
 
@@ -131,24 +76,13 @@ const HERO_VERTEX = /* glsl */ `
     attribute vec3 a_instancePos;
     attribute vec4 a_instanceQuaternions;
 
-    #ifdef IS_DEPTH
-        varying vec2 vHighPrecisionZW;
-    #else
-        varying vec3 v_worldPosition;
-        varying vec2 v_uv;
-        varying vec3 v_instancePos;
-        varying vec3 v_viewPosition;
-        varying vec3 v_viewNormal;
-        varying vec3 v_modelPosition;
-        varying vec3 v_worldNormal;
-
-        #ifdef USE_SHADOWMAP
-            uniform mat4 directionalShadowMatrix[1];
-            varying vec4 vDirectionalShadowCoord[1];
-            ${SHADOW_STRUCT_GLSL}
-            uniform DirectionalLightShadow directionalLightShadows[1];
-        #endif
-    #endif
+    varying vec3 v_worldPosition;
+    varying vec2 v_uv;
+    varying vec3 v_instancePos;
+    varying vec3 v_viewPosition;
+    varying vec3 v_viewNormal;
+    varying vec3 v_modelPosition;
+    varying vec3 v_worldNormal;
 
     uniform float u_scale;
     uniform float u_attenuation;
@@ -198,23 +132,13 @@ const HERO_VERTEX = /* glsl */ `
         vec4 viewPosition = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * viewPosition;
 
-        #ifdef IS_DEPTH
-            vHighPrecisionZW = gl_Position.zw;
-        #else
-            vec4 worldPosition = (modelMatrix * vec4(pos, 1.0));
-
-            v_uv = uv;
-            v_viewNormal = normalize(normalMatrix * norm);
-            v_worldPosition = worldPosition.xyz;
-            v_modelPosition = position;
-            v_viewPosition = -viewPosition.xyz;
-            v_instancePos = a_instancePos;
-            v_worldNormal = inverseTransformDirection(v_viewNormal, viewMatrix);
-
-            #ifdef USE_SHADOWMAP
-                vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPosition + vec4(v_worldNormal * directionalLightShadows[0].shadowNormalBias, 0. );
-            #endif
-        #endif
+        v_uv = uv;
+        v_viewNormal = normalize(normalMatrix * norm);
+        v_worldPosition = (modelMatrix * vec4(pos, 1.0)).xyz;
+        v_modelPosition = position;
+        v_viewPosition = -viewPosition.xyz;
+        v_instancePos = a_instancePos;
+        v_worldNormal = inverseTransformDirection(v_viewNormal, viewMatrix);
     }
 `
 
@@ -225,76 +149,41 @@ const HERO_FRAGMENT = /* glsl */ `
     varying vec3 v_modelPosition;
     varying vec3 v_worldNormal;
 
-    uniform vec3 u_lightPosition;
-    uniform sampler2D u_noiseTexture;
-    uniform vec2 u_noiseTexelSize;
-    uniform vec2 u_noiseCoordOffset;
     uniform vec3 u_color;
-    uniform float u_shadowStrength;
 
-    ${SHADOW_SAMPLING_GLSL}
+    ${VIEW_SHADING_GLSL}
 
     float linearStep(float edge0, float edge1, float x) {
         return clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     }
 
-    vec3 getBlueNoise (vec2 coord) {
-        return texture2D(u_noiseTexture, coord * u_noiseTexelSize + u_noiseCoordOffset).rgb;
-    }
-
-    float getShadowMask() {
-        vec3 blueNoise = getBlueNoise(gl_FragCoord.xy);
-        DirectionalLightShadow directionalLight = directionalLightShadows[0];
-        return getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.002, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
-    }
-
     void main() {
-        vec3 L = normalize(u_lightPosition - v_instancePos);
+        vec3 L = shadingDirection();
         vec3 N = normalize(normalize(v_instancePos) + 0.2 * normalize(v_worldNormal));
         float NdL = max(0., dot(N, L));
 
-        float distFromLight = length(u_lightPosition - v_worldPosition);
-        float attenuation = 1.0 / (0.00025 * pow(distFromLight, 8.0));
-
         float ao = linearStep(-0.5, -3.0, v_modelPosition.y);
 
-        float shadow = getShadowMask();
-        shadow = mix(1.0 - u_shadowStrength, 1.0, shadow);
-
+        // The shade never reaches black — the far side of a capsule keeps enough
+        // of the picked colour to still read as that colour rather than as an
+        // unlit silhouette — and never exceeds it either, so a pale base colour
+        // stays inside the bloom threshold instead of clipping to white.
         vec3 color = u_color;
-        color *= clamp(attenuation + smoothstep(-0.05, 1.0, NdL), 0.0, 1.0);
+        color *= 0.22 + 0.78 * smoothstep(-0.05, 1.0, NdL);
         color = pow(color, vec3(0.8));
         color *= ao * ao;
-        color *= shadow;
 
         gl_FragColor = vec4(color, 1.0);
         gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
     }
 `
 
-const HERO_DEPTH_FRAGMENT = /* glsl */ `
-    #include <common>
-    #include <packing>
-    varying vec2 vHighPrecisionZW;
-    void main() {
-        float fragCoordZ = 0.5 * vHighPrecisionZW[0] / vHighPrecisionZW[1] + 0.5;
-        gl_FragColor = packDepthToRGBA( fragCoordZ );
-    }
-`
-
-// Shared by the glass spheres and the floor plane.
+// The glass marbles.
 const SURFACE_VERTEX = /* glsl */ `
     varying vec3 v_viewNormal;
     varying vec2 v_uv;
     varying vec3 v_worldPosition;
     varying vec3 v_viewPosition;
-
-    #ifdef USE_SHADOWMAP
-        uniform mat4 directionalShadowMatrix[1];
-        varying vec4 vDirectionalShadowCoord[1];
-        ${SHADOW_STRUCT_GLSL}
-        uniform DirectionalLightShadow directionalLightShadows[1];
-    #endif
 
     vec3 inverseTransformDirection(in vec3 dir, in mat4 matrix) {
         return normalize((vec4(dir, 0.0) * matrix).xyz);
@@ -304,16 +193,10 @@ const SURFACE_VERTEX = /* glsl */ `
         vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * viewPosition;
 
-        vec4 worldPosition = (modelMatrix * vec4(position, 1.0));
         v_viewNormal = normalMatrix * normal;
         v_uv = uv;
-        v_worldPosition = worldPosition.xyz;
+        v_worldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
         v_viewPosition = -viewPosition.xyz;
-        vec3 worldNormal = inverseTransformDirection(v_viewNormal, viewMatrix);
-
-        #ifdef USE_SHADOWMAP
-            vDirectionalShadowCoord[0] = directionalShadowMatrix[0] * worldPosition + vec4(worldNormal * directionalLightShadows[0].shadowNormalBias, 0. );
-        #endif
     }
 `
 
@@ -322,7 +205,6 @@ const SPHERE_FRAGMENT = /* glsl */ `
     varying vec3 v_viewPosition;
     varying vec3 v_worldPosition;
 
-    uniform vec3 u_lightPosition;
     uniform sampler2D u_sceneTexture;
     uniform mat4 projectionMatrix;
     uniform sampler2D u_matcap;
@@ -330,15 +212,10 @@ const SPHERE_FRAGMENT = /* glsl */ `
     uniform float u_ior;
     uniform vec3 u_glassTint;
 
-    ${SHADOW_SAMPLING_GLSL}
+    ${VIEW_SHADING_GLSL}
 
     vec3 inverseTransformDirection( in vec3 dir, in mat4 matrix ) {
         return normalize( ( vec4( dir, 0.0 ) * matrix ).xyz );
-    }
-
-    float getShadowMask() {
-        DirectionalLightShadow directionalLight = directionalLightShadows[0];
-        return getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias, directionalLight.shadowRadius, vDirectionalShadowCoord[0]);
     }
 
     void main() {
@@ -346,9 +223,7 @@ const SPHERE_FRAGMENT = /* glsl */ `
 
         vec3 N = inverseTransformDirection(viewNormal, viewMatrix);
         vec3 V = normalize(cameraPosition - v_worldPosition);
-        vec3 L = u_lightPosition - v_worldPosition;
-        float lightDistance = length(L);
-        L /= lightDistance;
+        vec3 L = shadingDirection();
 
         vec3 H = normalize(V + L);
         float spec = max(0.0, dot(H, N));
@@ -376,42 +251,13 @@ const SPHERE_FRAGMENT = /* glsl */ `
         vec2 uv = vec2( dot( x, v_viewNormal ), dot( y, v_viewNormal ) ) * 0.495 + 0.5;
         vec4 matcapColor = texture2D( u_matcap, uv );
 
-        float shadow = getShadowMask();
-
         vec3 color = sceneBlurred;
-        color += shadow * 0.2 * pow(spec, 500.0);
-        color += (0.1 + 0.9 * shadow) * 0.03 * pow(matcapColor.rgb, vec3(2.2));
-        color += shadow * 0.005 * fresnel;
+        color += 0.2 * pow(spec, 500.0);
+        color += 0.03 * pow(matcapColor.rgb, vec3(2.2));
+        color += 0.005 * fresnel;
 
         gl_FragColor = vec4(0.8 * color * u_glassTint, 1.);
         gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
-    }
-`
-
-const FLOOR_FRAGMENT = /* glsl */ `
-    uniform sampler2D u_noiseTexture;
-    uniform vec2 u_noiseTexelSize;
-    uniform vec2 u_noiseCoordOffset;
-    uniform float u_contactShadow;
-
-    ${SHADOW_SAMPLING_GLSL}
-
-    vec3 getBlueNoise (vec2 coord) {
-        return texture2D(u_noiseTexture, coord * u_noiseTexelSize + u_noiseCoordOffset).rgb;
-    }
-
-    float getShadowMask() {
-        float shadow = 1.0;
-        vec3 blueNoise = getBlueNoise(gl_FragCoord.xy);
-        DirectionalLightShadow directionalLight = directionalLightShadows[0];
-        shadow *= 0.75 + 0.25 * getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.01, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(50.0 * blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
-        shadow *= getShadow( directionalShadowMap[0], directionalLight.shadowMapSize, directionalLight.shadowBias - blueNoise.z * 0.5, directionalLight.shadowRadius, vDirectionalShadowCoord[0] + vec4(50.0 * blueNoise.xy / directionalLight.shadowMapSize, 0.0, 0.0));
-        return shadow;
-    }
-
-    void main() {
-        float shadow = getShadowMask();
-        gl_FragColor = vec4(vec3(0.0, 0.02, 0.0), u_contactShadow * (1.0 - shadow));
     }
 `
 
@@ -667,21 +513,6 @@ function num(value: unknown, fallback: number): number {
     return Number.isFinite(n) ? n : fallback
 }
 
-function makeFallbackNoise(): THREE.Texture {
-    const size = 128
-    const data = new Uint8Array(size * size * 4)
-    for (let i = 0; i < data.length; i += 4) {
-        data[i] = Math.random() * 255
-        data[i + 1] = Math.random() * 255
-        data[i + 2] = Math.random() * 255
-        data[i + 3] = 255
-    }
-    const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat)
-    texture.wrapS = texture.wrapT = THREE.RepeatWrapping
-    texture.needsUpdate = true
-    return texture
-}
-
 function makeFallbackMatcap(): THREE.Texture {
     const size = 256
     const canvas = document.createElement("canvas")
@@ -793,12 +624,6 @@ function orbitPosition(
 function dentAttenuation(dentSize: number, orbSize: number): number {
     const scale = Math.max(0.05, dentSize * (orbSize / BASE_ORB_SIZE))
     return 4 / (scale * scale)
-}
-
-/** Azimuth in degrees around Y plus a height factor, on a sphere of radius 5. */
-function lightVector(angle: number, height: number, out: THREE.Vector3): THREE.Vector3 {
-    const a = (angle * Math.PI) / 180
-    return out.set(Math.cos(a), height, Math.sin(a)).normalize().multiplyScalar(5)
 }
 
 function makeRenderTarget(options?: THREE.RenderTargetOptions): THREE.WebGLRenderTarget {
@@ -969,11 +794,6 @@ interface SceneParams {
     capsuleColor: string
     coreColor: string
     glassTint: string
-    // Light & shadow
-    lightAngle: number
-    lightHeight: number
-    shadowStrength: number
-    contactShadow: number
     // Glass
     refraction: number
     glassThickness: number
@@ -999,7 +819,6 @@ interface Experience {
 function createExperience(
     container: HTMLDivElement,
     initialParams: SceneParams,
-    noiseUrl: string,
     matcapUrl: string,
     animate: boolean
 ): Experience | null {
@@ -1025,9 +844,6 @@ function createExperience(
     canvas.style.display = "block"
     container.appendChild(canvas)
 
-    renderer.shadowMap.enabled = true
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap
-    renderer.shadowMap.autoUpdate = false
     renderer.toneMapping = THREE.NoToneMapping
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setClearColor(0x000000, 1)
@@ -1035,59 +851,29 @@ function createExperience(
     // ── Scene ────────────────────────────────────────────────────────────────
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 30)
-    camera.position.set(0, 0, clamp(params.distance, 2.5, 14))
+    camera.position.set(0, 0, params.distance)
     camera.lookAt(0, 0, 0)
 
-    const lightPosition = lightVector(params.lightAngle, params.lightHeight, new THREE.Vector3())
-    const light = new THREE.DirectionalLight(0xffffff, 1)
-    light.position.copy(lightPosition)
-    light.castShadow = true
-    light.shadow.camera.left = -3
-    light.shadow.camera.right = 3
-    light.shadow.camera.top = 3
-    light.shadow.camera.bottom = -3
-    light.shadow.camera.near = 0.1
-    light.shadow.camera.far = 20
-    light.shadow.bias = -0.0001
-    light.shadow.mapSize.set(1024, 1024)
-    light.layers.enable(1)
-    scene.add(light)
-    scene.add(light.target)
-
-    const noiseTexture: { current: THREE.Texture | null } = { current: null }
     const matcapTexture: { current: THREE.Texture | null } = { current: null }
 
-    const heroUniforms: Record<string, THREE.IUniform> = Object.assign(
-        {
-            u_scale: { value: params.capsuleScale },
-            u_bulge: { value: params.bulge },
-            u_attenuation: { value: dentAttenuation(params.dentSize, params.orbSize) },
-            u_shadowStrength: { value: params.shadowStrength },
-            u_contactShadow: { value: params.contactShadow },
-            u_lightPosition: { value: lightPosition },
-            u_noiseTexture: { value: null },
-            u_noiseTexelSize: { value: new THREE.Vector2(1 / 128, 1 / 128) },
-            u_noiseCoordOffset: { value: new THREE.Vector2(0, 0) },
-            u_color: { value: toColor(params.capsuleColor, "#B2B8BB") },
-            u_sphere1Position: { value: new THREE.Vector3() },
-            u_sphere2Position: { value: new THREE.Vector3() },
-            u_sphere3Position: { value: new THREE.Vector3() },
-            u_sphere4Position: { value: new THREE.Vector3() },
-        },
-        THREE.UniformsUtils.merge([THREE.UniformsLib.lights])
-    )
+    const heroUniforms: Record<string, THREE.IUniform> = {
+        u_scale: { value: params.capsuleScale },
+        u_bulge: { value: params.bulge },
+        u_attenuation: { value: dentAttenuation(params.dentSize, params.orbSize) },
+        u_color: { value: toColor(params.capsuleColor, DEFAULT_CAPSULE_COLOR) },
+        u_sphere1Position: { value: new THREE.Vector3() },
+        u_sphere2Position: { value: new THREE.Vector3() },
+        u_sphere3Position: { value: new THREE.Vector3() },
+        u_sphere4Position: { value: new THREE.Vector3() },
+    }
 
-    const sphereUniforms: Record<string, THREE.IUniform> = Object.assign(
-        {
-            u_lightPosition: { value: lightPosition },
-            u_sceneTexture: { value: null },
-            u_matcap: { value: null },
-            u_thickness: { value: params.glassThickness },
-            u_ior: { value: params.refraction },
-            u_glassTint: { value: toColor(params.glassTint, "#FFFFFF") },
-        },
-        THREE.UniformsUtils.merge([THREE.UniformsLib.lights])
-    )
+    const sphereUniforms: Record<string, THREE.IUniform> = {
+        u_sceneTexture: { value: null },
+        u_matcap: { value: null },
+        u_thickness: { value: params.glassThickness },
+        u_ior: { value: params.refraction },
+        u_glassTint: { value: toColor(params.glassTint, "#FFFFFF") },
+    }
 
     const backgroundUniforms = {
         u_color0: { value: toColor(params.background, DEFAULT_BACKGROUND) },
@@ -1120,18 +906,8 @@ function createExperience(
         vertexShader: HERO_VERTEX,
         fragmentShader: HERO_FRAGMENT,
         uniforms: heroUniforms,
-        lights: true,
-    })
-    const heroDepthMaterial = new THREE.ShaderMaterial({
-        vertexShader: HERO_VERTEX,
-        fragmentShader: HERO_DEPTH_FRAGMENT,
-        uniforms: heroUniforms,
-        defines: { IS_DEPTH: true },
     })
     const hero = new THREE.Mesh(capsuleGeometry, heroMaterial)
-    hero.customDepthMaterial = heroDepthMaterial
-    hero.castShadow = true
-    hero.receiveShadow = true
     hero.frustumCulled = false
     scene.add(hero)
 
@@ -1141,38 +917,15 @@ function createExperience(
         vertexShader: SURFACE_VERTEX,
         fragmentShader: SPHERE_FRAGMENT,
         uniforms: sphereUniforms,
-        lights: true,
     })
     const spheres = ORBIT_CONFIGS.map(() => {
         const mesh = new THREE.Mesh(sphereGeometry, sphereMaterial)
         mesh.scale.setScalar(params.orbSize / BASE_ORB_SIZE)
         mesh.renderOrder = 1
-        mesh.receiveShadow = true
         mesh.layers.set(1)
         scene.add(mesh)
         return mesh
     })
-
-    // Floor shadow catcher (layer 1, transparent).
-    const floorMaterial = new THREE.ShaderMaterial({
-        vertexShader: SURFACE_VERTEX,
-        fragmentShader: FLOOR_FRAGMENT,
-        uniforms: heroUniforms,
-        lights: true,
-        transparent: true,
-    })
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), floorMaterial)
-    floor.rotation.x = -Math.PI / 2
-    floor.position.set(4, -3, -1.5)
-    floor.visible = params.contactShadow > 0
-    floor.layers.set(1)
-    // The catcher is an 8x8 slab parked off to one side, sized and placed for
-    // the opening view. Left in world space it swings out of frame as the
-    // camera comes round, taking the drop shadow with it — so it hangs off the
-    // same pivot as the light and stays where the viewer put it.
-    const floorPivot = new THREE.Group()
-    floorPivot.add(floor)
-    scene.add(floorPivot)
 
     // ── Post-processing ──────────────────────────────────────────────────────
     const fullscreenScene = new THREE.Scene()
@@ -1293,21 +1046,6 @@ function createExperience(
     }
 
     // ── Textures ─────────────────────────────────────────────────────────────
-    const noiseLoad = loadTexture(
-        noiseUrl,
-        (texture) => {
-            texture.wrapS = texture.wrapT = THREE.RepeatWrapping
-            texture.needsUpdate = true
-            noiseTexture.current = texture
-            heroUniforms.u_noiseTexture.value = texture
-            const image = texture.image as { width?: number; height?: number } | undefined
-            if (image && image.width && image.height) {
-                heroUniforms.u_noiseTexelSize.value.set(1 / image.width, 1 / image.height)
-            }
-            if (!animate) renderOnce()
-        },
-        makeFallbackNoise
-    )
     const matcapLoad = loadTexture(
         matcapUrl,
         (texture) => {
@@ -1324,27 +1062,6 @@ function createExperience(
     controls.zoomEnabled = params.allowZoom
     controls.autoRotate = params.autoRotate ? params.autoRotateSpeed : 0
 
-    /**
-     * Aim the key light — and the slab that catches its shadow — with the
-     * azimuth measured from the camera instead of from the world.
-     *
-     * The orb never turns — auto-rotate walks the camera around it. So a light
-     * fixed in world space stays put while the viewpoint moves, and on screen
-     * that reads backwards: the lit side, and every shadow with it, slides
-     * around the orb as it spins, as though the lamp were the thing rotating.
-     * Carrying the light along with the camera's own azimuth pins it where the
-     * viewer sees it, and the capsules turn through a beam that holds still.
-     *
-     * Height stays in world space on purpose — dragging up and down should let
-     * you look under a light that remains overhead.
-     */
-    function syncLight() {
-        const cameraAngle = (controls.azimuth * 180) / Math.PI
-        lightVector(params.lightAngle - cameraAngle, params.lightHeight, lightPosition)
-        light.position.copy(lightPosition)
-        floorPivot.rotation.y = controls.azimuth
-    }
-
     // ── Frame ────────────────────────────────────────────────────────────────
     let time = 0
     const tempVector = new THREE.Vector3()
@@ -1358,7 +1075,6 @@ function createExperience(
     function renderFrame(delta: number) {
         time += delta * params.speed
         controls.update(delta)
-        syncLight()
 
         for (let i = 0; i < spheres.length; i++) {
             if (i >= params.orbCount) {
@@ -1373,10 +1089,8 @@ function createExperience(
             spheres[i].position.copy(tempVector)
             spherePositionUniforms[i].value.copy(tempVector)
         }
-        heroUniforms.u_noiseCoordOffset.value.set(Math.random(), Math.random())
 
         // 1. Opaque scene (background, core, capsules) into the multisampled buffer.
-        renderer.shadowMap.needsUpdate = true
         renderer.autoClear = true
         camera.layers.set(0)
         renderer.setRenderTarget(sceneTarget)
@@ -1389,7 +1103,7 @@ function createExperience(
         fullscreenPass(kawaseMaterial, blurTarget)
         sphereUniforms.u_sceneTexture.value = blurTarget.texture
 
-        // 3. Glass spheres + floor shadow on top, keeping the depth buffer.
+        // 3. Glass marbles on top, keeping the depth buffer.
         renderer.autoClear = false
         camera.layers.set(1)
         renderer.setRenderTarget(sceneTarget)
@@ -1502,18 +1216,12 @@ function createExperience(
             if (next.distance !== previous.distance) controls.setDistance(next.distance)
 
             // Colors
-            heroUniforms.u_color.value = toColor(next.capsuleColor, "#B2B8BB")
+            heroUniforms.u_color.value = toColor(next.capsuleColor, DEFAULT_CAPSULE_COLOR)
             coreMaterial.color = toColor(next.coreColor, "#111111")
             sphereUniforms.u_glassTint.value = toColor(next.glassTint, "#FFFFFF")
             backgroundUniforms.u_color0.value = toColor(next.background, DEFAULT_BACKGROUND)
             backgroundUniforms.u_color1.value = shadeColor(next.background, next.backgroundShade)
             backgroundUniforms.u_angle.value = next.gradientAngle
-
-            // Light & shadow — both materials share the one lightPosition vector.
-            syncLight()
-            heroUniforms.u_shadowStrength.value = next.shadowStrength
-            heroUniforms.u_contactShadow.value = next.contactShadow
-            floor.visible = next.contactShadow > 0
 
             // Glass
             sphereUniforms.u_thickness.value = next.glassThickness
@@ -1533,7 +1241,6 @@ function createExperience(
         dispose() {
             disposed = true
             stop()
-            noiseLoad.cancel()
             matcapLoad.cancel()
             intersection?.disconnect()
             controls.dispose()
@@ -1544,13 +1251,10 @@ function createExperience(
             sphereGeometry.dispose()
             core.geometry.dispose()
             background.geometry.dispose()
-            floor.geometry.dispose()
             fullscreenGeometry.dispose()
             ;[
                 heroMaterial,
-                heroDepthMaterial,
                 sphereMaterial,
-                floorMaterial,
                 backgroundMaterial,
                 coreMaterial,
                 kawaseMaterial,
@@ -1562,9 +1266,7 @@ function createExperience(
             ;[sceneTarget, kawaseTarget, blurTarget, luminanceTarget, ...downTargets, ...upTargets].forEach(
                 (target) => target.dispose()
             )
-            noiseTexture.current?.dispose()
             matcapTexture.current?.dispose()
-            light.shadow.dispose()
             renderer.dispose()
             renderer.forceContextLoss()
             if (canvas.parentNode === container) container.removeChild(canvas)
@@ -1583,11 +1285,6 @@ interface ResponsiveImageValue {
 }
 
 /** The two grouped controls. Each renders as one row summarising its fields. */
-interface OrbShadow {
-    strength: number
-    contact: number
-}
-
 interface OrbGlass {
     refraction: number
     thickness: number
@@ -1614,14 +1311,10 @@ interface CapsuleOrbProps {
     speed: number
     autoRotate: boolean
     autoRotateSpeed: number
-    animateOnCanvas: boolean
     // Interaction — drag to orbit is always on, so neither of these has a control.
     interactive: boolean
     allowZoom: boolean
-    // Light & material
-    lightAngle: number
-    lightHeight: number
-    shadow: OrbShadow
+    // Material
     glass: OrbGlass
     // Effects
     bloomIntensity: number
@@ -1631,8 +1324,7 @@ interface CapsuleOrbProps {
     vignetteSpread: number
     // Performance
     maxPixelRatio: number
-    // Textures
-    noiseImage?: ResponsiveImageValue
+    // Texture
     matcapImage?: ResponsiveImageValue
     style?: CSSProperties
 }
@@ -1648,7 +1340,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         background = DEFAULT_BACKGROUND,
         backgroundShade = 0.7,
         gradientAngle = 0,
-        capsuleColor = "#B2B8BB",
+        capsuleColor = DEFAULT_CAPSULE_COLOR,
         coreColor = "#111111",
         glassTint = "#FFFFFF",
         capsuleCount = DEFAULT_INSTANCES_COUNT,
@@ -1662,38 +1354,30 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         speed = BASE_SPEED,
         autoRotate = false,
         autoRotateSpeed = 0.3,
-        animateOnCanvas = false,
         interactive = true,
         allowZoom = true,
-        lightAngle = 166,
-        lightHeight = 0.78,
-        shadow = DEFAULT_SHADOW,
         glass = DEFAULT_GLASS,
-        bloomIntensity = 2,
-        bloomThreshold = 0.65,
+        bloomIntensity = 1,
+        bloomThreshold = 0.82,
         bloomSpread = 0.85,
         vignette = 0.6,
         vignetteSpread = 0.3,
         maxPixelRatio = 1.5,
-        noiseImage,
         matcapImage,
         style,
     } = props
 
-    // The grouped controls arrive as objects, and the two sizes and the speed dial
-    // as percentages. Both are read defensively: a partial object, or a number the
-    // host handed over as a string, falls back to the scene's own value.
-    const shadowStrength = clamp(num(shadow?.strength, DEFAULT_SHADOW.strength), 0, 1)
-    const contactShadow = clamp(num(shadow?.contact, DEFAULT_SHADOW.contact), 0, 1)
+    // The grouped control arrives as an object, and the two sizes and the speed
+    // dial as percentages. Both are read defensively: a partial object, or a number
+    // the host handed over as a string, falls back to the scene's own value.
     const refraction = clamp(num(glass?.refraction, DEFAULT_GLASS.refraction), 1, 2.5)
     const glassThickness = clamp(num(glass?.thickness, DEFAULT_GLASS.thickness), 0, 2)
     const capsuleScale = BASE_CAPSULE_SCALE * (clamp(num(capsuleSize, 100), 10, 400) / 100)
     const orbSize = BASE_ORB_SIZE * (clamp(num(marbleSize, 100), 10, 400) / 100)
     const orbitSpeed = clamp(num(speed, BASE_SPEED), 0, 200) / BASE_SPEED
+    const cameraDistance = clamp(num(distance, 5), 2.5, 14)
 
-    const isStatic = useIsStaticRenderer()
-    const animate = !isStatic || animateOnCanvas
-    const noiseUrl = noiseImage?.src || DEFAULT_NOISE_URL
+    const animate = !useIsStaticRenderer()
     const matcapUrl = matcapImage?.src || DEFAULT_MATCAP_URL
 
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1707,7 +1391,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         orbCount: Math.round(clamp(num(orbCount, ORBIT_CONFIGS.length), 0, ORBIT_CONFIGS.length)),
         orbSize,
         orbDistance,
-        distance,
+        distance: cameraDistance,
         speed: orbitSpeed,
         autoRotate,
         autoRotateSpeed,
@@ -1719,10 +1403,6 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         capsuleColor,
         coreColor,
         glassTint,
-        lightAngle,
-        lightHeight,
-        shadowStrength,
-        contactShadow,
         refraction,
         glassThickness,
         bloomIntensity,
@@ -1740,7 +1420,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         const container = containerRef.current
         if (!container || typeof window === "undefined") return
 
-        const experience = createExperience(container, paramsRef.current, noiseUrl, matcapUrl, animate)
+        const experience = createExperience(container, paramsRef.current, matcapUrl, animate)
         if (!experience) return
         experienceRef.current = experience
 
@@ -1761,7 +1441,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
             experience.dispose()
             experienceRef.current = null
         }
-    }, [noiseUrl, matcapUrl, animate])
+    }, [matcapUrl, animate])
 
     // Push property changes into the running scene without rebuilding it.
     useEffect(() => {
@@ -1778,7 +1458,7 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         orbCount,
         orbSize,
         orbDistance,
-        distance,
+        cameraDistance,
         orbitSpeed,
         autoRotate,
         autoRotateSpeed,
@@ -1790,10 +1470,6 @@ export default function CapsuleOrb(props: CapsuleOrbProps) {
         capsuleColor,
         coreColor,
         glassTint,
-        lightAngle,
-        lightHeight,
-        shadowStrength,
-        contactShadow,
         refraction,
         glassThickness,
         bloomIntensity,
@@ -1836,6 +1512,9 @@ addPropertyControls(CapsuleOrb, {
     // them outside Framer (option lists are read as strings), and the component
     // then receives "" where it expected a number. `Marbles` is a stepper for
     // that reason.
+    //
+    // There is nothing here for light: the scene has none, so there is no angle
+    // to aim and no shadow to soften.
 
     // ── Colors ───────────────────────────────────────────────────────────────
     background: {
@@ -1847,8 +1526,8 @@ addPropertyControls(CapsuleOrb, {
     capsuleColor: {
         type: ControlType.Color,
         title: "Base Color",
-        description: "The colour of the capsules before lighting.",
-        defaultValue: "#B2B8BB",
+        description: "The colour of the capsules. It is the colour you see — nothing lights them.",
+        defaultValue: DEFAULT_CAPSULE_COLOR,
     },
     glassTint: {
         type: ControlType.Color,
@@ -1928,42 +1607,7 @@ addPropertyControls(CapsuleOrb, {
         disabledTitle: "No",
     },
 
-    // ── Light & material ─────────────────────────────────────────────────────
-    lightAngle: {
-        type: ControlType.Number,
-        title: "Light Angle",
-        description: "Rotates the key light around the orb.",
-        defaultValue: 166,
-        min: 0,
-        max: 360,
-        step: 1,
-        unit: "\u00b0",
-    },
-    shadow: {
-        type: ControlType.Object,
-        title: "Shadow",
-        description: "How dark the capsules shadow each other, and the contact shade under the orb.",
-        controls: {
-            strength: {
-                type: ControlType.Number,
-                title: "Strength",
-                description: "How dark a shadowed capsule goes.",
-                defaultValue: DEFAULT_SHADOW.strength,
-                min: 0,
-                max: 1,
-                step: 0.05,
-            },
-            contact: {
-                type: ControlType.Number,
-                title: "Contact",
-                description: "The soft shade the orb casts on the ground beneath it.",
-                defaultValue: DEFAULT_SHADOW.contact,
-                min: 0,
-                max: 1,
-                step: 0.05,
-            },
-        },
-    },
+    // ── Material ─────────────────────────────────────────────────────────────
     glass: {
         type: ControlType.Object,
         title: "Glass",
