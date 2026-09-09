@@ -73,17 +73,24 @@ stop of the gradient is that colour multiplied down, in linear space.
 
 ## Light Veil
 
-A dark ambient light field: blurred vertical columns of emerald and teal breathing
-behind frosted glass, with muted red and amber glows surfacing underneath them,
-cycling between full color and drained grayscale. Single-file Framer code
-component — no imports beyond React and Framer.
+A dark ambient light field: a drum of blurred emerald haze, glowing bands and
+narrow cyan streaks turning about a dense core behind frosted glass, textured
+with fine vertical lines, with muted red and amber glows surfacing inside the
+green clusters, cycling between full color and drained grayscale. Single-file
+Framer code component — no imports beyond React and Framer.
 
 ### Key features
 
 - The whole composition is one full-screen fragment shader on a raw WebGL context: no three.js, no post-processing package, no textures to load
-- Layered softness per column — a bright inner core, a diffused body and a wide halo — so nothing ever reads as a hard beam
-- Columns are wide and hazy at the top and taper into thin streaks as they fall, with brightness rising and falling along their length
-- Color drains to grayscale and floods back on a seamless loop; positions and shapes are untouched, only saturation goes
+- The composition is one fixed structure seen from a turning angle, not a field sliding past: a dense core of light stands close to a vertical axis through the middle of the frame and hardly moves, and the rest of the clusters ride a drum around it
+- A cluster on the drum comes forward across the front — wide, bright and quick — slows towards the flank, turns, and tracks back behind the core, small and dim and running the other way, before coming round again. The turn is clockwise seen from above, so the near side travels right to left
+- The screen speed of every light falls out of the same projection: greatest dead in front, dropping towards the flanks, reversed and slower round the back, and slower again on the inner rings — nothing moves at one flat rate
+- The drum itself carries the fine vertical lines. Screen x is mapped back onto the cylinder for the near face and for the far face, so the lines are noise fixed to the drum rather than lights drawn one by one, and the far face — squeezed towards the axis by the perspective — packs its lines far more tightly and always runs against the near ones
+- Four layers — broad haze masses, medium bands, narrow streaks and warm glows — share the same cluster centres, so the reds and ambers belong to the green clusters rather than floating loose
+- Layered softness per light — a bright inner core, a diffused body and a wide halo — so nothing ever reads as a hard beam
+- Gentle parallax — the haze rides an inner ring, the streaks the outer one, the bands between — for depth without the layers coming apart, since every layer turns on the same angle
+- Irregular vertical extents and per-light breathing keep the frame from ever reading as a row of evenly spaced bars
+- Color drains to grayscale and floods back on a seamless loop; positions, shapes and travel are untouched, only saturation goes
 - A precision-safe hash keeps the layout identical on mobile GPUs, where the usual `sin`-based noise drifts
 - Reseedable layout and dithered output so the near-black falloffs never band
 - Pauses off-screen, rebuilds itself after WebGL context loss, and disposes everything on unmount
@@ -91,15 +98,15 @@ component — no imports beyond React and Framer.
 ### API Reference
 
 All props map directly to the controls panel sliders and color pickers, ordered
-palette first, then composition, then the grouped row.
+palette first, then composition, then motion, then the grouped row.
 
 #### COLOUR
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
 | `background` | color | `#03080B` | The near-black the lights float in. |
-| `coolA` | color | `#1BE087` | The colour most of the columns are drawn from. |
-| `coolB` | color | `#0A6B60` | The colour the dimmer columns fall back to. Columns mix between the two. |
+| `coolA` | color | `#1BE087` | The colour most of the lights are drawn from. |
+| `coolB` | color | `#0A6B60` | The colour the dimmer lights and the broad haze fall back to. |
 | `warmA` | color | `#C2264F` | The colour of the warm glows underneath. |
 | `colorMode` | enum | `cycle` | Cycle drains to grayscale and back; Colour and Mono hold one look. |
 
@@ -107,17 +114,19 @@ palette first, then composition, then the grouped row.
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `coolCount` | number | `15` | How many light shafts hang from the top edge. |
-| `warmCount` | number | `9` | How many dim warm glows surface underneath the cool columns. |
+| `coolCount` | number | `16` | How much light fills the field. Scales the haze, the bands and the streaks together. |
+| `warmCount` | number | `8` | How many dim red and amber glows surface inside the green clusters. |
 | `softness` | number | `1` | How far each light diffuses. Low is a sharp shaft, high is a wide haze. |
 | `intensity` | number | `1` | Overall strength of the light field. |
-| `seed` | number | `37` | Reshuffles the column positions and widths. |
+| `seed` | number | `37` | Reshuffles the clusters, their positions and their widths. Any value is a different field. |
 
 #### MOTION
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `speed` | number | `50` | How fast the whole field breathes and drifts. 50 is the natural pace. |
+| `sweep` | number | `0.28` | How fast the drum turns. Always the same way round, so a cluster comes forward, goes back behind the core and comes round again. Shown as **Travel**. |
+| `curve` | number | `0.9` | How much nearer the front of the turn is than the back. Low is a flat wheel; high makes the near side larger, brighter and faster, and packs the far side tighter behind the core. Shown as **Depth**. |
+| `speed` | number | `50` | How fast the frame sweeps, and how fast the field breathes with it. 50 is the natural pace. |
 | `animateOnCanvas` | boolean | `false` | Keep animating on the Framer canvas instead of rendering one static frame. |
 
 #### FINISH
@@ -129,8 +138,31 @@ palette first, then composition, then the grouped row.
 
 ### Props without a control
 
-`warmAmount` `1` · `haze` `0.55` · `falloff` `0.8` · `breath` `1` · `drift` `1` ·
-`monoLift` `1.45` · `warmB` `#E08A2A` · `grain` `0.014` · `maxPixelRatio` `1`
+`clockwise` `true` · `warmAmount` `0.72` · `haze` `0.7` · `falloff` `0.8` ·
+`breath` `0.55` · `drift` `1` · `monoLift` `0.62` · `warmB` `#E08A2A` ·
+`grain` `0.014` · `maxPixelRatio` `1`
+
+`clockwise` is the direction of the turn, seen from above. True sends the near
+side right to left and the far side back left to right; false reverses both.
+
+`haze` is also what the drum lines hang off: at zero the light is unstriated
+and the far face's own faint grain behind the core goes with it.
+
+`monoLift` is why grayscale reads as bright fog rather than a dimmed copy. It is
+applied to a *root* of the luminance, not the luminance itself: a plain multiply
+drives the highlights so far up the tone map that they clip and the whole state
+flattens to one white. The root re-lifts the mid tones and leaves headroom at the
+top, which is what turns local highlights into fog while positions, shapes and
+travel carry on untouched.
+
+Three constants in the source set the scale rather than the look. `DRUM_RADIUS`
+(`0.46` screen widths from the axis) is where the fine lines are drawn and about
+where the outer clusters ride, so at the default Depth a cluster turns round
+just inside the edge of the frame. `DRUM_LINES_COARSE` and `DRUM_LINES_FINE`
+(`40` and `260`) are how many lines of each scale the drum carries the whole way
+round; they are integers because the noise wraps on them, which is what makes
+a turn seamless. At the default Travel a full revolution takes about sixteen
+seconds.
 
 ## Two things worth not undoing
 
