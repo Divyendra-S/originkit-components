@@ -380,7 +380,7 @@ const FRAGMENT_SHADER = /* glsl */ `
             // Only half the zoom goes into the height: at full strength a near
             // mass grows tall enough to blanket the frame, and the dark floor is
             // the first thing to go.
-            float ry = (0.16 + r3 * 0.20) * mix(1.0, zoom, 0.5);
+            float ry = (0.16 + r3 * 0.20) * mix(1.0, zoom, 0.5) * (0.85 + 0.50 * clamp(cx, 0.0, 1.0));
             ry *= 1.0 + 0.22 * u_breath * sin(t * (0.06 + r3 * 0.08) + r1 * 6.2832);
 
             // Near light is bright light. Together with the width and height the
@@ -431,7 +431,7 @@ const FRAGMENT_SHADER = /* glsl */ `
             // How far down the frame this band survives before dissolving. It
             // grows with the zoom, so a band coming forward lengthens as well as
             // widening — the two together are what sell the approach.
-            float reach = top + (0.20 + r4 * 0.40) * zoom;
+            float reach = top + (0.20 + r4 * 0.40) * zoom * (0.80 + 0.65 * clamp(cx, 0.0, 1.0));
             reach *= 1.0 + 0.20 * u_breath * sin(t * (0.08 + r1 * 0.12) + r2 * 6.2832);
 
             float amp = (0.07 + 0.95 * pow(r5, 2.2)) * mix(0.60, 1.20, girth) * clusterGain(k, t);
@@ -487,7 +487,7 @@ const FRAGMENT_SHADER = /* glsl */ `
             // Some are tall, some are a short concentrated highlight halfway down.
             float top = mix(0.0, 0.40, pow(r2, 1.4)) + 0.03 * front;
             // Some stretch downwards over time and pull back up again.
-            float reach = top + (0.14 + r4 * 0.46) * zoom;
+            float reach = top + (0.14 + r4 * 0.46) * zoom * (0.80 + 0.65 * clamp(cx, 0.0, 1.0));
             reach *= 1.0 + 0.26 * u_breath * sin(t * (0.09 + r1 * 0.13) + r3 * 6.2832);
 
             // Where the bright core sits, and how far it shifts inside its halo.
@@ -544,7 +544,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
             // These live across the middle and lower middle of their own clump,
             // never the full height.
-            float cy = 0.38 + r3 * 0.22 + 0.04 * front;
+            float cy = 0.34 + r3 * 0.22 + 0.04 * front + 0.20 * clamp(cx, 0.0, 1.0);
             cy += 0.05 * u_breath * sin(t * (0.11 + r4 * 0.12) + r2 * 6.2832);
             float ry = (0.10 + r4 * 0.20) * zoom;
 
@@ -612,8 +612,20 @@ const FRAGMENT_SHADER = /* glsl */ `
         float axisMask = exp(-xp * xp * 9.0) * (1.0 - smoothstep(0.10, 0.70, v)) * smoothstep(-0.05, 0.12, v);
         glow += mix(u_coolB, u_coolA, 0.25) * striateFar * axisMask * u_haze * 0.04;
 
-        // The lower part of the frame stays dark; nothing lands on a surface.
-        float depth = mix(1.0, 1.0 - smoothstep(0.34, 0.86, v), u_falloff);
+        // ── The diagonal ─────────────────────────────────────────────────────
+        // The reference is composed on a diagonal, not a horizon: the light hangs
+        // from the top edge on the left, sits lower and lower towards the right,
+        // and leaves the top right and the bottom left dark. A static envelope
+        // over the frame does that — a floor that drops from a third of the way
+        // down at the left edge to three quarters at the right, and a ceiling
+        // that comes down over the right-hand side — so the turning lights pass
+        // through it the way they would pass behind a fixed edge of glass. The
+        // floor breathes a little, so the bottom fills and empties over time.
+        float floorAt = 0.34 + 0.42 * x + 0.06 * sin(t * 0.045);
+        float floorMask = 1.0 - smoothstep(floorAt, floorAt + 0.32, v);
+        float ceilingAt = max(0.0, (x - 0.50) * 0.75);
+        float ceilingMask = smoothstep(ceilingAt - 0.10, ceilingAt + 0.22, v);
+        float depth = mix(1.0, floorMask * ceilingMask, u_falloff);
         glow *= depth;
 
         // A breath of fog so the gaps read as atmosphere, not void.
