@@ -1549,7 +1549,7 @@ addPropertyControls(CapsuleOrb, {
     },
     capsuleSize: {
         type: ControlType.Number,
-        title: "Capsule Size",
+        title: "Size",
         description: "The thickness of each capsule, as a percentage of the default.",
         defaultValue: 100,
         min: 25,

@@ -1310,14 +1310,15 @@ export default function LightVeil(props: LightVeilProps) {
 
 addPropertyControls(LightVeil, {
     // Ordered the way the rest of the kit orders a panel: the background and the
-    // palette first, then the numbers most people reach for, then one grouped row
-    // for the cycle timings, which only matter in one of the three modes.
+    // palette first, then the numbers most people reach for, then the finish.
     //
     // Kept deliberately small. Every other knob the shader supports still exists
     // as a prop with a default — see the destructuring in LightVeil — it just
     // isn't worth a row in the panel. `seed` is one of them: the structure is
     // meant to be the one structure, so it is fixed at its default rather than
-    // offered as a reshuffle.
+    // offered as a reshuffle. `cycle` and `animateOnCanvas` are two more: the
+    // cycle timings confused more than they helped, and the canvas switch is a
+    // Framer-only concern, so both stay at their defaults unless set in code.
     //
     // `colorMode` is the only Enum, and its options are strings on purpose: an
     // Enum whose options are numbers loses them outside Framer (option lists are
@@ -1428,14 +1429,6 @@ addPropertyControls(LightVeil, {
         max: 100,
         step: 1,
     },
-    animateOnCanvas: {
-        type: ControlType.Boolean,
-        title: "On Canvas",
-        description: "Keep animating on the Framer canvas instead of rendering one static frame.",
-        defaultValue: false,
-        enabledTitle: "Animate",
-        disabledTitle: "Static",
-    },
 
     // ── Finish ─────────────────────────────────────────────────────
     vignette: {
@@ -1446,33 +1439,5 @@ addPropertyControls(LightVeil, {
         min: 0,
         max: 1,
         step: 0.05,
-    },
-    cycle: {
-        type: ControlType.Object,
-        title: "Cycle",
-        description: "How long one colour-to-grayscale round takes, and how long the drain lasts.",
-        controls: {
-            period: {
-                type: ControlType.Number,
-                title: "Period",
-                description: "Seconds for one full round trip through grayscale and back.",
-                defaultValue: DEFAULT_CYCLE.period,
-                min: 4,
-                max: 60,
-                step: 1,
-                unit: "s",
-            },
-            fade: {
-                type: ControlType.Number,
-                title: "Fade",
-                description: "Seconds the colour takes to drain, and to flood back.",
-                defaultValue: DEFAULT_CYCLE.fade,
-                min: 0.2,
-                max: 12,
-                step: 0.1,
-                unit: "s",
-            },
-        },
-        hidden: (props: LightVeilProps) => props.colorMode !== "cycle",
     },
 })

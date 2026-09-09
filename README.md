@@ -2,15 +2,16 @@
 
 ## Capsule Orb
 
-A sphere of instanced capsules that orbiting glass marbles dent as they pass, lit
-with real shadows, refraction and bloom. Single-file Framer code component —
-three.js is the only dependency.
+A sphere of instanced capsules that orbiting glass marbles dent as they pass,
+with refraction and bloom. Single-file Framer code component — three.js is the
+only dependency.
 
 ### Key features
 
 - 250–8,000 instanced capsules on a golden-angle sphere, rebuilt live from the panel
 - Up to four glass marbles with true screen-space refraction
 - Marbles carve dents whose reach tracks their size automatically
+- No light source and nothing casts a shadow: the capsules are the colour you pick, modelled by one direction fixed to the camera, so the bright side stays put as the orb turns
 - Mipmap bloom, vignette and sRGB output implemented inline — no post-processing package
 - Drag to orbit and wheel/pinch to zoom, always on, plus optional auto-rotate
 - Pauses off-screen, survives WebGL context loss, disposes everything on unmount
@@ -25,8 +26,8 @@ palette first, then the numbers most people reach for, then the grouped rows.
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `background` | color | `#AEB2B5` | The colour behind the orb. The gradient shades away from it on its own. |
-| `capsuleColor` | color | `#B2B8BB` | The colour of the capsules before lighting. |
+| `background` | color | `#000000` | The colour behind the orb. The gradient shades away from it on its own. |
+| `capsuleColor` | color | `#D9DDE0` | The colour of the capsules. It is the colour you see — nothing lights them. |
 | `glassTint` | color | `#FFFFFF` | Tints the glass marbles orbiting the orb. White leaves them clear. |
 
 #### FORM
@@ -46,12 +47,10 @@ palette first, then the numbers most people reach for, then the grouped rows.
 | `speed` | number | `50` | How fast the marbles travel around their orbits. 50 is the natural pace. |
 | `autoRotate` | boolean | `false` | Spins the camera around the orb on its own. |
 
-#### LIGHT & MATERIAL
+#### MATERIAL
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lightAngle` | number | `166` | Rotates the key light around the orb, in degrees. |
-| `shadow` | object | `{ strength: 0.6, contact: 0.3 }` | How dark a shadowed capsule goes, and the contact shade under the orb. |
 | `glass` | object | `{ refraction: 1.45, thickness: 0.6 }` | How strongly the marbles bend the scene behind them. |
 
 ### Props without a control
@@ -63,13 +62,23 @@ row:
 `interactive` `true` (drag to orbit has no switch; it is always on) ·
 `allowZoom` `true` · `bulge` `0.4` · `dentSize` `1` · `orbDistance` `1.9` ·
 `autoRotateSpeed` `0.3` · `gradientAngle` `0` · `backgroundShade` `0.7` ·
-`coreColor` `#111111` · `lightHeight` `0.78` · `bloomIntensity` `2` ·
-`bloomThreshold` `0.65` · `bloomSpread` `0.85` · `vignette` `0.6` ·
-`vignetteSpread` `0.3` · `maxPixelRatio` `1.5` · `animateOnCanvas` `false` ·
-`noiseImage` · `matcapImage`
+`coreColor` `#111111` · `bloomIntensity` `1` · `bloomThreshold` `0.82` ·
+`bloomSpread` `0.85` · `vignette` `0.6` · `vignetteSpread` `0.3` ·
+`maxPixelRatio` `1.5` · `matcapImage`
 
 `backgroundShade` is what keeps one background colour from reading flat: the far
-stop of the gradient is that colour multiplied down, in linear space.
+stop of the gradient is that colour multiplied down, in linear space. On the
+default black it has nothing to shade, which is the point of a black default.
+
+There is no `lightAngle`, `lightHeight`, `shadow` or `animateOnCanvas` — the
+first three went with the light itself, and the canvas switch went with the
+panel. On the Framer canvas the component now renders one static frame and
+animates in preview and on the published site.
+
+`noiseImage` went too. The blue noise texture only ever dithered the shadow
+taps, so with the shadows gone nothing sampled it; dropping it also drops one
+of the two images the component fetches at runtime. `matcapImage` is the one
+that remains, and it has a procedural fallback if the fetch fails.
 
 ## Light Veil
 
@@ -89,6 +98,7 @@ Framer code component — no imports beyond React and Framer.
 - Four layers — broad haze masses, medium bands, narrow streaks and warm glows — share the same cluster centres, so the reds and ambers belong to the green clusters rather than floating loose
 - Layered softness per light — a bright inner core, a diffused body and a wide halo — so nothing ever reads as a hard beam
 - Gentle parallax — the haze rides an inner ring, the streaks the outer one, the bands between — for depth without the layers coming apart, since every layer turns on the same angle
+- The frame is composed on a diagonal, as the reference is: light hangs from the top edge on the left and sits lower towards the right, with the top right and bottom left left dark, through a fixed envelope the turning lights pass behind
 - Irregular vertical extents and per-light breathing keep the frame from ever reading as a row of evenly spaced bars
 - Color drains to grayscale and floods back on a seamless loop; positions, shapes and travel are untouched, only saturation goes
 - A precision-safe hash keeps the layout identical on mobile GPUs, where the usual `sin`-based noise drifts
@@ -98,7 +108,7 @@ Framer code component — no imports beyond React and Framer.
 ### API Reference
 
 All props map directly to the controls panel sliders and color pickers, ordered
-palette first, then composition, then motion, then the grouped row.
+palette first, then composition, then motion, then the finish.
 
 #### COLOUR
 
@@ -118,7 +128,6 @@ palette first, then composition, then motion, then the grouped row.
 | `warmCount` | number | `8` | How many dim red and amber glows surface inside the green clusters. |
 | `softness` | number | `1` | How far each light diffuses. Low is a sharp shaft, high is a wide haze. |
 | `intensity` | number | `1` | Overall strength of the light field. |
-| `seed` | number | `37` | Reshuffles the clusters, their positions and their widths. Any value is a different field. |
 
 #### MOTION
 
@@ -127,20 +136,33 @@ palette first, then composition, then motion, then the grouped row.
 | `sweep` | number | `0.28` | How fast the drum turns. Always the same way round, so a cluster comes forward, goes back behind the core and comes round again. Shown as **Travel**. |
 | `curve` | number | `0.9` | How much nearer the front of the turn is than the back. Low is a flat wheel; high makes the near side larger, brighter and faster, and packs the far side tighter behind the core. Shown as **Depth**. |
 | `speed` | number | `50` | How fast the frame sweeps, and how fast the field breathes with it. 50 is the natural pace. |
-| `animateOnCanvas` | boolean | `false` | Keep animating on the Framer canvas instead of rendering one static frame. |
 
 #### FINISH
 
 | Props | Type | Default | Description |
 | --- | --- | --- | --- |
 | `vignette` | number | `0.45` | How dark the corners of the frame go. |
-| `cycle` | object | `{ period: 16, fade: 2.4 }` | Seconds for one round trip through grayscale, and how long the drain lasts. Only in Cycle mode. |
 
 ### Props without a control
 
+`seed` `37` · `cycle` `{ period: 16, fade: 2.4 }` · `animateOnCanvas` `false` ·
 `clockwise` `true` · `warmAmount` `0.72` · `haze` `0.7` · `falloff` `0.8` ·
 `breath` `0.55` · `drift` `1` · `monoLift` `0.62` · `warmB` `#E08A2A` ·
 `grain` `0.014` · `maxPixelRatio` `1`
+
+`cycle` is the timing of the Cycle colour mode: `period` seconds for one round
+trip through grayscale and back, `fade` seconds for the drain and the flood. It
+only applies in that mode, and the defaults give the seamless loop the
+reference has, so it no longer takes a row in the panel.
+
+`animateOnCanvas` keeps the animation running on the Framer canvas. At its
+default the canvas shows one static frame and the component animates in
+preview and on the published site, which is what every other component in the
+kit does.
+
+`seed` reshuffles the clusters, their positions and their widths. It has no
+control on purpose: the composition is meant to be one fixed structure, so it
+stays at its default unless set in code.
 
 `clockwise` is the direction of the turn, seen from above. True sends the near
 side right to left and the far side back left to right; false reverses both.
@@ -181,6 +203,8 @@ missing value lands on its default instead of on zero.
 
 **three.js is pinned to a full URL.** Capsule Orb only.
 `import * as THREE from "https://esm.sh/three@0.170.0"`. A bare `"three"`
-resolves through a CDN at whatever version is current; on r186 the shadow
-sampler types no longer match, every instanced draw fails with
-`GL_INVALID_OPERATION`, and the capsule shell renders as nothing at all.
+resolves through a CDN at whatever version is current; on r186 every instanced
+draw fails with `GL_INVALID_OPERATION` and the capsule shell renders as nothing
+at all. That was first traced to the shared PCF shadow code, which the component
+no longer carries — the pin stays because an unpinned import is a version you
+never chose, not because of that one symptom.
