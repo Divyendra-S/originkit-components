@@ -29,9 +29,6 @@ const DEFAULT_COOL_B = "#0A6B60"
 const DEFAULT_WARM_A = "#C2264F"
 const DEFAULT_WARM_B = "#E08A2A"
 
-const LABEL_FONT_STACK =
-    'Inter, "Google Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Shaders
 // ─────────────────────────────────────────────────────────────────────────────
@@ -669,13 +666,6 @@ interface LightVeilProps {
     // Finish
     vignette: number
     grain: number
-    // Label
-    showLabel: boolean
-    labelText: string
-    labelColor: string
-    labelBackground: string
-    labelSize: number
-    labelInset: number
     // Performance
     maxPixelRatio: number
     style?: CSSProperties
@@ -712,12 +702,6 @@ export default function LightVeil(props: LightVeilProps) {
         warmB = DEFAULT_WARM_B,
         vignette = 0.45,
         grain = 0.014,
-        showLabel = true,
-        labelText = "AI modified",
-        labelColor = "#E4E4E4",
-        labelBackground = "rgba(28, 28, 28, 0.72)",
-        labelSize = 16,
-        labelInset = 24,
         maxPixelRatio = 1,
         style,
     } = props
@@ -829,31 +813,7 @@ export default function LightVeil(props: LightVeilProps) {
                 background: background,
                 ...style,
             }}
-        >
-            {showLabel && (
-                <div
-                    style={{
-                        position: "absolute",
-                        left: labelInset,
-                        bottom: labelInset,
-                        display: "flex",
-                        alignItems: "center",
-                        padding: `${Math.round(labelSize * 0.66)}px ${Math.round(labelSize * 1.15)}px`,
-                        borderRadius: 999,
-                        background: labelBackground,
-                        color: labelColor,
-                        font: `500 ${labelSize}px/1 ${LABEL_FONT_STACK}`,
-                        letterSpacing: "0.005em",
-                        whiteSpace: "nowrap",
-                        backdropFilter: "blur(8px)",
-                        WebkitBackdropFilter: "blur(8px)",
-                        pointerEvents: "none",
-                    }}
-                >
-                    {labelText}
-                </div>
-            )}
-        </div>
+        />
     )
 }
 
@@ -981,23 +941,5 @@ addPropertyControls(LightVeil, {
         min: 0,
         max: 1,
         step: 0.05,
-    },
-
-    // ── Label ──────────────────────────────────────────────────────
-    showLabel: {
-        type: ControlType.Boolean,
-        title: "Label",
-        description: "Shows the small pill of text over the field.",
-        defaultValue: true,
-        enabledTitle: "Show",
-        disabledTitle: "Hide",
-    },
-    labelText: {
-        type: ControlType.String,
-        title: "Text",
-        description: "What the pill says.",
-        defaultValue: "AI modified",
-        placeholder: "AI modified",
-        hidden: (props: LightVeilProps) => !props.showLabel,
     },
 })
