@@ -194,6 +194,160 @@ round; they are integers because the noise wraps on them, which is what makes
 a turn seamless. At the default Travel a full revolution takes about sixteen
 seconds.
 
+## Vortex Ring
+
+A hollow ring of liquid energy seen face-on: one ribbon of two hundred thousand
+glowing points circulating around a circle, twisting about its own path,
+bunching into white sheets and thinning to blue threads, and continuously
+tearing fountains of itself upward, inside a wide cyan atmosphere over black.
+Single-file Framer code component — no imports beyond React and Framer.
+
+### Key features
+
+- gl.POINTS only, additively blended, in two colours and one white: a point rolled away draws the deep blue, a point on the lit face the electric cyan, a point both face-on and squeezed white — and stacking finishes it, so the blue survives only where the material is thin or turned under
+- The ribbon is a strip wrapped around a circle and bent by six seeded Fourier fields — radius, twist, width, along-ring compression, density and a medium ripple — each travelling at a fraction of the flow speed, so structures drift around the ring while material streams through them
+- The along-ring displacement is asymmetric, so its compression shocks: a dense stretch has a sharp leading edge and a long tail and reads as a sheet streaming round the ring, not as a bead on a string
+- Upward splashes are the ring's second population: they tear off the sheet and shoot up on a short repeating life, dense at the base and separating into loose dots as they climb. Site strength is a field read at the birth angle and birth moment, so most of the ring only fizzes while a few stretches throw a fountain half a radius high, and a site builds, fires and dies as the flow passes through it
+- Screen-up is up: a plume leaving the bottom of the ring rises into the hole, which the reference frames also show
+- The sheet is lit from the camera: a section rolled toward you burns white, an edge-on fold is a thin line, a section rolled away is the deep-blue underside — the white-sheet / blue-fold alternation of the reference
+- The split crest at the top of the ring, present in every reference frame, is a fixed screen-space feature whose strength rides on the flow through it, so the horns grow, lean and collapse while the split stays put
+- Every moving term is an integer harmonic of one loop phase and the flow makes a whole number of turns per loop, so the loop is seamless by construction — no state, no reset, nothing reversed
+- Six-level blurred mip chain, the widest two run three times over, for a tight bloom on the crests and an atmosphere that reaches the frame edges; the wide part is painted in one tinted colour rather than blurred from the scene, because the reference's glow has no red in it at all
+- One static frame on the Framer canvas, animation in preview and on the published site; pauses off-screen and in a background tab, honours reduced motion, rebuilds after WebGL context loss, disposes everything on unmount
+
+### API Reference
+
+All props map directly to the controls panel, in the panel's order.
+
+#### LAYOUT
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `size` | number | `80` | Ring diameter as a percentage of the frame's shorter side. |
+| `thickness` | number | `5` | Width of the ribbon, 0–10. 5 is the reference; 0 is a thread. |
+| `particles` | number | `210000` | How many points make up the ring, spray included. More is finer grain, not brighter. |
+| `pointSize` | number | `3` | Diameter of one point in px at a 900px frame. Smaller is grainier. |
+
+#### ANIMATION
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `speed` | number | `5` | How fast the material flows around the ring. 0 holds it still. |
+| `direction` | enum | `"clockwise"` | `"clockwise"` or `"counterclockwise"`. |
+| `shape` | object | `{ bulge: 5, twist: 5, waves: 5, turbulence: 5, gaps: 5, crown: 5 }` | The deformation, one dial per scale of motion. Bulge is the slow silhouette, Twist the roll of the sheet, Waves the lobes, Turbulence the per-point wander, Gaps how far sparse stretches thin, Crown the split crests at the top. All neutral at 5. |
+| `spray` | object | `{ amount: 5, reach: 5, lift: 5 }` | The upward splashes: how much of the budget they get, how far they fan, how high the biggest plumes climb. |
+| `seed` | number | `7` | Picks one fixed ring out of the family. Same seed, same ring. |
+
+#### COLORS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `background` | color | `#000206` | The colour behind the ring. |
+| `color` | color | `#3AE6FF` | The lit face of the ribbon. Where the points pile up it burns through to white. |
+| `deepColor` | color | `#0A3CFF` | The rolled-away underside, showing between the bright sheets. It also sets how blue the wide atmosphere runs. |
+
+#### EFFECTS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `glow` | object | `{ bloom: 5, halo: 5 }` | Tight bloom on the crests and the wide atmosphere around the ring. |
+
+### Props without a control
+
+`loopSeconds` `36` · `turns` `3` · `weight` `5` · `depth` `5` ·
+`maxPixelRatio` `1.5` · `animateOnCanvas` `false`
+
+`loopSeconds` is how long one seamless loop takes at Speed 5; Speed scales it
+(10 is nearly three times the pace, 0 holds). `turns` is how many whole
+circuits the material makes in one loop, and has to stay an integer for the
+loop to close — that is why it is not a slider.
+
+`weight` is the one vertical bias on the ribbon itself: how much broader the
+bottom of the ring runs than the top, from the frames. `depth` is the
+ribbon's thickness through its face, which is what gives an edge-on fold a
+body instead of a hairline.
+
+`animateOnCanvas` keeps the animation running on the Framer canvas. At its
+default the canvas shows one static frame and the component animates in
+preview and on the published site, like the rest of the kit.
+
+## Halo Shell
+
+A hollow globe of liquid electricity: a dense white-cyan dome with glowing
+strands hanging down a spherical surface, which once a cycle gathers itself
+into a bright flattened cap and one clean orbital ring, then grows back into
+an irregular shell, over a near-black navy void. Single-file Framer code
+component — no imports beyond React and Framer.
+
+### Key features
+
+- gl.POINTS only, additively blended, in one colour into a float target: the dark blue → cyan → white palette is nothing but points stacking through a per-channel tone map, so brightness can only sit where the material is densest
+- Every point owns a place on one strand: a seeded path down the sphere from a root high in the dome, meandering in longitude, tapering to a tip that frays into dots. Material streams down each path a whole number of times per loop
+- The dome is not an element — it is the strands' roots piling up above fifty degrees. Lateral offsets are kept as arc length, so near the pole the roots wander into a branching network of veins rather than a comb of parallels
+- Forks are child strands that copy a parent's path to a branch depth and then peel away; their points double the parent's density above the branch, so a fork is brighter than either arm
+- The cycle — globe, gather, ring, dissolve, regrow — is a handful of smoothstep envelopes of one loop phase, and the way in is not the way out: strands fade from the bottom and a band of material collects and tightens into the ring; later the ring frays into falling particles and new strands grow down from the cap with their tips leading
+- The cap is the dome again, packed above forty-three degrees and flattened, and the ring is a share of the same points slid over the surface — three configurations of one material, never three objects
+- The ring sinks while it lives, as the frames show it at two heights, and the far side of the sphere is drawn dim and half as dense, so the shell reads as a volume and the ring's far arc sits behind it
+- Every moving term is an integer harmonic of the loop phase and every envelope returns to its start, so the loop is seamless by construction — no state, no reset, nothing reversed
+- Four-level blurred mip chain for a tight bloom on the cap, the ring and the veins, and a wide navy halo around the sphere
+- One static frame on the Framer canvas, animation in preview and on the published site; pauses off-screen and in a background tab, honours reduced motion, rebuilds after WebGL context loss, falls back to a CSS approximation without WebGL 2, disposes everything on unmount
+
+### API Reference
+
+All props map directly to the controls panel, in the panel's order.
+
+#### LAYOUT
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `size` | number | `76` | Sphere diameter as a percentage of the frame's shorter side. |
+| `strands` | number | `120` | How many strands hang down the sphere, forks included. |
+| `particles` | number | `120000` | How many points make up the shell. More is finer grain, not brighter. |
+| `shell` | object | `{ reach: 5, width: 5, meander: 5, scatter: 5 }` | The strands' shape: how far they hang, how wide they are, how far they wander sideways, and the share of points that break loose and drift. All neutral at 5. |
+
+#### ANIMATION
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `speed` | number | `5` | How fast the energy flows and the cycle turns. 0 holds it still. |
+| `cycleSeconds` | number | `30` | Seconds one globe-to-ring-and-back cycle takes at Speed 5. |
+| `ring` | object | `{ height: 3, drift: 5, share: 5 }` | The orbital ring: where on the sphere it forms (0 is the equator), how far it sinks while it lives (0 holds it still), and how much of the material joins it. |
+| `seed` | number | `3` | Picks one fixed globe out of the family. Same seed, same strands. |
+
+#### COLORS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `background` | color | `#02070F` | The colour behind the sphere. |
+| `color` | color | `#4FC8FF` | The one colour the points are drawn in. Where they pile up it goes cyan, then white. |
+| `exposure` | number | `5` | Overall brightness (panel title "Brightness"). 5 is the reference; 10 burns the dome out. |
+
+#### EFFECTS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `glow` | object | `{ bloom: 5, halo: 5 }` | Tight bloom on the bright regions and the wide atmosphere around the sphere. |
+
+### Props without a control
+
+`pointSize` `2.2` · `offsetY` `0` · `flowTrips` `3` · `branching` `5` ·
+`maxPixelRatio` `1.5` · `animateOnCanvas` `false`
+
+`pointSize` is the diameter of one point in px at a 900px frame; the
+per-point intensity is calibrated against it, so it changes grain, not
+brightness. `offsetY` moves the sphere up or down as a percentage of the
+frame height, for when the cap's bloom needs more headroom than a centred
+sphere leaves.
+
+`flowTrips` is how many whole trips the material makes down a strand in one
+cycle, and has to stay an integer for the loop to close — that is why it is
+not a slider. `branching` is how many strands fork off another, 0–10; it
+changes the strand family, so it rebuilds the lattice.
+
+`animateOnCanvas` keeps the animation running on the Framer canvas. At its
+default the canvas shows one static frame and the component animates in
+preview and on the published site, like the rest of the kit.
+
 ## Two things worth not undoing
 
 Both components rendered black when first uploaded outside Framer. These are why.
@@ -216,3 +370,76 @@ draw fails with `GL_INVALID_OPERATION` and the capsule shell renders as nothing
 at all. That was first traced to the shared PCF shadow code, which the component
 no longer carries — the pin stays because an unpinned import is a version you
 never chose, not because of that one symptom.
+
+## Energy Form
+
+A suspended structure of electricity — an octahedral crystal or a sphere — that
+gathers out of magenta dust, floods with orange-white energy from its poles,
+cools, bends, breaks back into particles and gathers again, ringed by a wide
+equatorial band of pink particles. Single-file Framer code component — no
+imports beyond React and Framer.
+
+Built from nine frames of a reference loop. Where the brief and the frames
+disagree the frames win, and the component header says where.
+
+### Key features
+
+- One component, two shapes: the diamond of the reference and a spherical field made of the same material — same points, same lines, same nodes, same cycle, same band; only the geometry changes
+- Three additive primitives into a half-float buffer, then a five-level bloom: tiny points (tens of thousands), thin screen-facing ribbons for the structural lines, and one core-and-halo sprite per anchor node. Raw WebGL, no three.js
+- Every point owns a home on the structure — on a line, on a face or the shell, inside the volume, on the band, or leaving a node — and a loose position off it. Assembly slides points onto their homes; dissolution slides them off. Nothing is emitted or destroyed, so the two states are always continuous
+- One heat ramp — magenta → pink → red → orange → yellow-white — indexed by a local heat, so a line can still be hot beside dust that has cooled. Whites are stacking and bloom on top of orange, never a white element
+- The surge is polar, as in the frames: assembly and heat travel as a front from the poles to the equator, the caps blow out and draw material toward the axis while the front is still near them, and the full orange crystal is what the front looks like once it has arrived
+- A two-lobed field drifting over the object offsets assembly locally, so one edge holds while the one beside it is dust; lines break along their length the same way, and the points that lived on them are what remains
+- Lines bow with a few loop-safe sinusoids — stiff while assembled, loose while dissolving, internal lines several times more than the outer edges — and the points on a line ride the same function
+- Pulses run along each line from the shallower node, with a bright head and a fading tail; a node flares when a pulse leaves or arrives
+- The band is a ring of points in world space with inner rings orbiting faster, a lobed vertical wave, corrugation when dense and haze when loose; its far side is dimmed where it lies behind the silhouette and is farther, so it wraps
+- One master loop of three energy cycles, every moving term a sinusoid of the loop or cycle phase with a whole-number frequency, whole turns and whole orbits — seamless by construction, and no two cycles break up the same way
+- Draws one frame on the Framer canvas at a chosen phase and animates in preview and on the published site; pauses off-screen and in a background tab, honours reduced motion, rebuilds after context loss, disposes everything on unmount
+
+### API Reference
+
+All props map directly to the controls panel, in this order: layout, animation,
+colours, then the grouped effect dials. Dials are 0–10 with 5 neutral.
+
+#### LAYOUT
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `shape` | enum | `"diamond"` | `"diamond"` or `"sphere"`. |
+| `size` | number | `66` | Object height as a percentage of the frame's shorter side. |
+| `particles` | number | `60000` | Points in the structure and band together, 4,000–200,000. |
+| `pointSize` | number | `2.2` | Point diameter in CSS px at a 900px frame. |
+
+#### ANIMATION
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `speed` | number | `5` | Playback rate. 0 holds the frame at the start phase. |
+| `cycleSeconds` | number | `22` | Seconds per energy cycle at speed 5. The loop is three cycles. |
+| `rotation` | number | `5` | Whole turns per loop plus wobble. 0 holds still. |
+| `phase` | number | `0.42` | Where in the cycle to begin, and the frame the canvas shows. 0.42 is the assembled crystal, 0.2 the surge, 0.65 cooling, 0.95 sparse. |
+
+#### COLORS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `background` | color | `#050206` | The colour behind everything. |
+| `hue` | number | `0` | Rotates the whole palette, in degrees. |
+
+#### EFFECTS
+
+| Props | Type | Default | Description |
+| --- | --- | --- | --- |
+| `energy` | object | `{ heat: 5, dissolve: 5, flow: 5, surge: 5 }` | Peak temperature, how far the shape comes apart, pulses per cycle, and the polar blow-out. |
+| `lines` | object | `{ thickness: 5, bend: 5, inner: 5 }` | Line width, flexibility, and the brightness of the internal lines. |
+| `band` | object | `{ amount: 5, radius: 5, wave: 5, speed: 5 }` | Density, radius, vertical wave and orbits per loop of the equatorial band. |
+| `glow` | object | `{ bloom: 5, atmosphere: 4, nodes: 5 }` | Bloom on the cores, the red haze around the object, and node size. |
+| `seed` | number | `7` | Reseeds the interior junctions, the sphere's anchors and every point's home. |
+
+### Props without a control
+
+`maxPixelRatio` `1.5` · `poleDots` `true` (the two detached dots above and
+below the object on its axis)
+
+Whole-number dials: `rotation`, `energy.flow` and `band.speed` round to whole
+turns, pulses and orbits per loop, so any setting keeps the loop seamless.
